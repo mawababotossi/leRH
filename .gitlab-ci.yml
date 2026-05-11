@@ -1,0 +1,53 @@
+image: python:3.11
+
+stages:
+  - lint
+  - test
+  - build
+
+variables:
+  PIP_CACHE_DIR: "$CI_PROJECT_DIR/.cache/pip"
+  NODE_VERSION: "22"
+
+cache:
+  paths:
+    - .cache/pip
+    - adapters/whatsapp/node_modules
+
+before_script:
+  - pip install -e ".[dev]"
+
+lint:
+  stage: lint
+  script:
+    - ruff check .
+    - ruff format --check .
+
+test:
+  stage: test
+  script:
+    - pytest --cov=src/leRH --cov-report=term
+  coverage: '/TOTAL.*\s+(\d+%)$/'
+
+whatsapp-check:
+  stage: test
+  image: node:${NODE_VERSION}
+  script:
+    - cd adapters/whatsapp
+    - npm install
+    - npx tsc --noEmit
+  only:
+    changes:
+      - adapters/whatsapp/**/*
+
+build:
+  stage: build
+  image: docker:latest
+  services:
+    - docker:dind
+  script:
+    - docker build -t $CI_REGISTRY_IMAGE:$CI_COMMIT_REF_SLUG .
+    - docker push $CI_REGISTRY_IMAGE:$CI_COMMIT_REF_SLUG
+  only:
+    - main
+    - dev
