@@ -46,6 +46,17 @@ class CVRepository:
         result = await self.session.execute(select(CV).where(CV.user_id == user_id))
         return list(result.scalars().all())
 
+    async def get_latest_for_user(self, user_id: str) -> CV | None:
+        """Retourne le CV le plus récemment uploadé par l'utilisateur.
+
+        Utilisé pour récupérer l'analyse du vrai CV avant la génération
+        de documents ATS (CV, lettre de motivation).
+        """
+        result = await self.session.execute(
+            select(CV).where(CV.user_id == user_id).order_by(CV.created_at.desc()).limit(1)
+        )
+        return result.scalar_one_or_none()
+
     async def create(self, **kwargs) -> CV:
         cv = CV(**kwargs)
         self.session.add(cv)

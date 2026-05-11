@@ -9,7 +9,7 @@ from leRH.core.credits import CreditManager
 from leRH.core.documents.generator import GENERATED_DIR, DocumentGenerator
 from leRH.db.base import async_session_factory
 from leRH.db.models import Job
-from leRH.db.repository import UserRepository
+from leRH.db.repository import CVRepository, UserRepository
 
 logger = logging.getLogger(__name__)
 
@@ -31,9 +31,30 @@ async def generate_document_background(
             repo = UserRepository(session)
             user = await repo.get_by_id(user_id)
 
+            # Charger le dernier CV analysé dans la même session
+            cv_repo = CVRepository(session)
+            cv_record = await cv_repo.get_latest_for_user(user_id)
+            cv_analysis = cv_record.analysis if cv_record else None
+            if cv_analysis:
+                logger.info(
+                    "[bg] CV analysé trouvé pour %s — les données du vrai CV seront utilisées",
+                    user_id,
+                )
+            else:
+                logger.info(
+                    "[bg] Aucun CV uploadé pour %s — génération depuis le profil seulement",
+                    user_id,
+                )
+
         if not user:
             logger.error("[bg] Utilisateur %s introuvable", user_id)
-            await _send_notification(platform, chat_id, None, "Utilisateur introuvable.")
+            await _send_notification(
+                platform=platform,
+                chat_id=chat_id,
+                relative_path=None,
+                caption="Utilisateur introuvable.",
+                absolute_path=None,
+            )
             return
 
         logger.info("[bg] Utilisateur chargé — %s", user.name)
@@ -44,22 +65,30 @@ async def generate_document_background(
         logger.info("[bg] Appel LLM + génération fichier…")
         if func_name == "generate_cv":
             buf, filename = await loop.run_in_executor(
-                None, lambda: doc_gen.generate_cv(user, job, fmt="docx")
+                None, lambda: doc_gen.generate_cv(user, job, fmt="pdf", cv_analysis=cv_analysis)
             )
         else:
             buf, filename = await loop.run_in_executor(
-                None, lambda: doc_gen.generate_cover_letter(user, job, fmt="docx")
+                None,
+                lambda: doc_gen.generate_cover_letter(
+                    user, job, fmt="pdf", cv_analysis=cv_analysis
+                ),
             )
         logger.info("[bg] Fichier généré — %s (%d bytes)", filename, buf.getbuffer().nbytes)
 
+        # Save file under GENERATED_DIR / user_id / filename
         user_dir = GENERATED_DIR / user_id
         user_dir.mkdir(parents=True, exist_ok=True)
         filepath = user_dir / filename
         with open(filepath, "wb") as f:
             f.write(buf.getvalue())
+
+        # relative_path is what the download endpoint expects after /documents/download/
+        # It must match the {filepath:path} parameter, i.e. "user_id/filename.docx"
         relative_path = f"{user_id}/{filename}"
         logger.info("[bg] Fichier sauvegardé — %s (relative: %s)", filepath, relative_path)
 
+        # Deduct credits AFTER successful generation
         credit_mgr = CreditManager()
         result = await credit_mgr.deduct(
             user_id, cost, reason=f"generation_{func_name}_for_{job.id}"
@@ -70,24 +99,35 @@ async def generate_document_background(
             result.success,
         )
 
-        caption = f"Votre {doc_type} est prêt ! 📎 Vous pouvez le télécharger maintenant."
-        await _send_notification(platform, chat_id, relative_path, caption, str(filepath))
+        caption = (
+            f"Votre {doc_type} est prêt ! 📎\n\n"
+            "Il a été optimisé pour l'offre et votre profil. "
+            "Dites-moi s'il vous convient ou si vous voulez que je modifie quelque chose."
+        )
+        await _send_notification(
+            platform=platform,
+            chat_id=chat_id,
+            relative_path=relative_path,
+            caption=caption,
+            absolute_path=str(filepath),
+        )
         logger.info("[bg] Notification envoyée — platform=%s", platform)
 
     except Exception:
         logger.exception("[bg] ÉCHEC génération %s — user=%s", doc_type, user_id)
         await _send_notification(
-            platform,
-            chat_id,
-            None,
-            "Désolé, la génération de votre document a échoué. Veuillez réessayer.",
+            platform=platform,
+            chat_id=chat_id,
+            relative_path=None,
+            caption="Désolé, la génération de votre document a échoué. Veuillez réessayer.",
+            absolute_path=None,
         )
 
 
 async def _send_notification(
     platform: str,
     chat_id: str | int,
-    relative_path: Path | str | None,
+    relative_path: str | None,
     caption: str,
     absolute_path: str | None = None,
 ) -> None:
@@ -127,7 +167,9 @@ async def _send_telegram(chat_id: str | int, filepath: str | None, caption: str)
 
 
 async def _queue_whatsapp(
-    chat_id: str | int, relative_path: Path | str | None, caption: str
+    chat_id: str | int,
+    relative_path: str | None,
+    caption: str,
 ) -> None:
     from leRH.db.base import async_session_factory as session_factory
     from leRH.db.models import PendingMessage
@@ -142,15 +184,22 @@ async def _queue_whatsapp(
                         platform_chat_id=str(chat_id),
                         message_type="document" if relative_path else "text",
                         text=caption,
-                        document_path=str(relative_path) if relative_path else None,
+                        document_path=relative_path,
                     )
                 )
                 await session.commit()
+            logger.info(
+                "[bg] WhatsApp pending message queued — chat_id=%s path=%s",
+                chat_id,
+                relative_path,
+            )
             return
         except Exception as e:
             if attempt < max_retries - 1 and "database is locked" in str(e).lower():
                 wait = (attempt + 1) * 0.5
-                logger.warning(f"DB locked, retry in {wait}s (attempt {attempt + 1}/{max_retries})")
+                logger.warning(
+                    "DB locked, retry in %ss (attempt %d/%d)", wait, attempt + 1, max_retries
+                )
                 await asyncio.sleep(wait)
             else:
                 raise

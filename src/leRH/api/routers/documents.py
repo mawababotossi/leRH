@@ -12,7 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from leRH.core.credits import COVER_LETTER_COST, CV_COST, CreditManager
 from leRH.core.documents.generator import GENERATED_DIR, DocumentGenerator
 from leRH.db.base import get_db
-from leRH.db.repository import JobRepository, UserRepository
+from leRH.db.repository import CVRepository, JobRepository, UserRepository
 from leRH.schemas import DocumentGenerateRequest
 
 logger = logging.getLogger(__name__)
@@ -76,11 +76,21 @@ async def generate_cv(
     if not job:
         raise HTTPException(status_code=404, detail="Offre non trouvée")
 
+    # Charger le dernier CV analysé pour enrichir la génération
+    cv_repo = CVRepository(db)
+    cv_record = await cv_repo.get_latest_for_user(payload.user_id)
+    cv_analysis = cv_record.analysis if cv_record else None
+    if not cv_analysis:
+        logger.info(
+            "User %s has no uploaded CV — document will be generated from profile fields only",
+            payload.user_id,
+        )
+
     await _check_credits(payload.user_id, CV_COST, session=db)
 
     try:
         gen = DocumentGenerator()
-        buf, filename = gen.generate_cv(user, job, fmt=payload.format)
+        buf, filename = gen.generate_cv(user, job, fmt=payload.format, cv_analysis=cv_analysis)
         await _deduct_credits(payload.user_id, CV_COST, f"generate_cv_{job.id}", session=db)
 
         content_type = (
@@ -116,11 +126,18 @@ async def generate_cover_letter(
     if not job:
         raise HTTPException(status_code=404, detail="Offre non trouvée")
 
+    # Charger le dernier CV analysé pour enrichir la génération
+    cv_repo = CVRepository(db)
+    cv_record = await cv_repo.get_latest_for_user(payload.user_id)
+    cv_analysis = cv_record.analysis if cv_record else None
+
     await _check_credits(payload.user_id, COVER_LETTER_COST, session=db)
 
     try:
         gen = DocumentGenerator()
-        buf, filename = gen.generate_cover_letter(user, job, fmt=payload.format)
+        buf, filename = gen.generate_cover_letter(
+            user, job, fmt=payload.format, cv_analysis=cv_analysis
+        )
         await _deduct_credits(
             payload.user_id, COVER_LETTER_COST, f"generate_cover_letter_{job.id}", session=db
         )
@@ -158,12 +175,21 @@ async def generate_all(
     if not job:
         raise HTTPException(status_code=404, detail="Offre non trouvée")
 
+    # Charger le dernier CV analysé (une seule requête pour les deux documents)
+    cv_repo = CVRepository(db)
+    cv_record = await cv_repo.get_latest_for_user(payload.user_id)
+    cv_analysis = cv_record.analysis if cv_record else None
+
     await _check_credits(payload.user_id, CV_COST + COVER_LETTER_COST, session=db)
 
     try:
         gen = DocumentGenerator()
-        cv_buf, cv_filename = gen.generate_cv(user, job, fmt=payload.format)
-        cl_buf, cl_filename = gen.generate_cover_letter(user, job, fmt=payload.format)
+        cv_buf, cv_filename = gen.generate_cv(
+            user, job, fmt=payload.format, cv_analysis=cv_analysis
+        )
+        cl_buf, cl_filename = gen.generate_cover_letter(
+            user, job, fmt=payload.format, cv_analysis=cv_analysis
+        )
         await _deduct_credits(
             payload.user_id, CV_COST + COVER_LETTER_COST, f"generate_all_{job.id}", session=db
         )
@@ -192,6 +218,8 @@ async def download_file(filepath: str):
     decoded_path = unquote(filepath)
     logger.info(f"Download request: decoded={decoded_path}")
     file_path = GENERATED_DIR / decoded_path
+    if not file_path.resolve().is_relative_to(GENERATED_DIR.resolve()):
+        raise HTTPException(status_code=403, detail="Accès refusé")
     logger.info(f"Download request: full_path={file_path} exists={file_path.exists()}")
     if not file_path.exists():
         raise HTTPException(status_code=404, detail="Fichier non trouvé")

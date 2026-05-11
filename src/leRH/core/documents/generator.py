@@ -33,9 +33,14 @@ _BOLD_FONT_PATHS = [
     "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
     "/usr/share/fonts/dejavu/DejaVuSans-Bold.ttf",
 ]
+_ITALIC_FONT_PATHS = [
+    "/usr/share/fonts/dejavu/DejaVuSans-Oblique.ttf",
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans-Oblique.ttf",
+]
 
 FONT_PATH = next((p for p in _FONT_PATHS if Path(p).exists()), None)
 BOLD_FONT_PATH = next((p for p in _BOLD_FONT_PATHS if Path(p).exists()), None)
+ITALIC_FONT_PATH = next((p for p in _ITALIC_FONT_PATHS if Path(p).exists()), None)
 PDF_FONT = "DejaVu" if FONT_PATH and BOLD_FONT_PATH else "Helvetica"
 
 CV_GENERATION_PROMPT = """You are an expert resume writer specializing in ATS (Applicant Tracking System) optimization. Generate a tailored, ATS-friendly CV in French for the candidate based on their profile and the target job.
@@ -144,7 +149,34 @@ class DocumentGenerator:
         )
         GENERATED_DIR.mkdir(parents=True, exist_ok=True)
 
-    def _build_profile_text(self, user: User) -> str:
+    def _sanitize_filename(self, text: str) -> str:
+        """Supprime les accents et caractères non-ASCII pour éviter les bugs WhatsApp/URL."""
+        import re
+        import unicodedata
+
+        # Normalisation NFKD pour séparer les caractères de base des accents
+        normalized = unicodedata.normalize("NFKD", text)
+        # On garde seulement les caractères ASCII (ce qui supprime les accents)
+        ascii_text = normalized.encode("ascii", "ignore").decode("ascii")
+        # Remplacement des espaces par des underscores
+        no_spaces = ascii_text.replace(" ", "_")
+        # Nettoyage strict : ne garder que l'alphanumérique et les underscores
+        clean_name = re.sub(r"[^a-zA-Z0-9_]", "", no_spaces)
+        return clean_name
+
+    def _build_profile_text(self, user: User, cv_analysis: dict | None = None) -> str:
+        """Construit le texte de profil pour les prompts LLM.
+
+        Priorité des données :
+        1. Champs directs du User (nom, pays, activité…)
+        2. Profil structuré extrait du vrai CV via `cv_analysis` (table cvs.analysis)
+        3. Texte brut extrait du CV si disponible
+
+        Args:
+            user: Le modèle User SQLAlchemy.
+            cv_analysis: Le champ `analysis` du dernier CV uploadé par l'utilisateur,
+                         tel que retourné par `ProfileExtractor.analyze_cv()`.
+        """
         parts = [f"Nom: {user.name}"]
         if user.activity:
             parts.append(f"Titre actuel: {user.activity}")
@@ -152,28 +184,73 @@ class DocumentGenerator:
             parts.append(f"Localisation: {user.city}")
         if user.country:
             parts.append(f"Pays: {user.country}")
-        if user.diploma:
-            parts.append(f"Diplôme: {user.diploma}")
-        if user.experience:
-            parts.append(f"Expérience: {user.experience}")
-        if user.skills:
-            skills = user.skills
-            if isinstance(skills, list):
-                parts.append(f"Compétences: {', '.join(skills)}")
-            elif isinstance(skills, dict):
-                parts.append(f"Compétences: {json.dumps(skills, ensure_ascii=False)}")
-        if user.languages:
-            langs = user.languages
-            if isinstance(langs, list):
-                lang_strs = []
-                for lang in langs:
-                    if isinstance(lang, dict):
-                        lang_strs.append(f"{lang.get('language', '')} ({lang.get('level', '')})")
-                    else:
-                        lang_strs.append(str(lang))
-                parts.append(f"Langues: {', '.join(lang_strs)}")
         if user.phone:
             parts.append(f"Téléphone: {user.phone}")
+
+        # --- Données issues du vrai CV analysé (source la plus fiable) ---
+        cv_profile: dict = {}
+        if cv_analysis and isinstance(cv_analysis, dict):
+            cv_profile = cv_analysis.get("profile", {})
+
+        # Diplôme : préférer le CV analysé s'il est plus précis
+        diploma = cv_profile.get("diploma") or user.diploma
+        if diploma:
+            parts.append(f"Diplôme: {diploma}")
+
+        # Expérience : le champ texte du CV analysé est plus riche que le résumé saisi
+        experience = cv_profile.get("experience") or user.experience
+        if experience:
+            parts.append(f"Expérience: {experience}")
+
+        # Compétences : fusionner CV analysé + champs User (sans doublons)
+        skills_from_cv: list[str] = []
+        if cv_profile.get("skills"):
+            raw = cv_profile["skills"]
+            skills_from_cv = raw if isinstance(raw, list) else [str(raw)]
+
+        skills_from_user: list[str] = []
+        if user.skills:
+            s = user.skills
+            if isinstance(s, list):
+                skills_from_user = s
+            elif isinstance(s, dict):
+                skills_from_user = list(s.values())
+
+        all_skills = list(
+            dict.fromkeys(skills_from_cv + skills_from_user)
+        )  # déduplique en gardant l'ordre
+        if all_skills:
+            parts.append(f"Compétences: {', '.join(all_skills)}")
+
+        # Certifications issues du CV
+        if cv_profile.get("certifications"):
+            certs = cv_profile["certifications"]
+            if isinstance(certs, list) and certs:
+                parts.append(f"Certifications: {', '.join(certs)}")
+
+        # Formation détaillée depuis le CV
+        if cv_profile.get("education"):
+            edu = cv_profile["education"]
+            parts.append(f"Formation (détaillée): {json.dumps(edu, ensure_ascii=False)}")
+
+        # Langues : préférer le CV analysé
+        langs_from_cv: list = cv_profile.get("languages", [])
+        langs_from_user = user.languages or []
+        langs_source = langs_from_cv if langs_from_cv else langs_from_user
+
+        if langs_source and isinstance(langs_source, list):
+            lang_strs = []
+            for lang in langs_source:
+                if isinstance(lang, dict):
+                    lang_strs.append(f"{lang.get('language', '')} ({lang.get('level', '')})")
+                else:
+                    lang_strs.append(str(lang))
+            parts.append(f"Langues: {', '.join(lang_strs)}")
+
+        # Analyse narrative du CV (contexte riche pour le LLM)
+        if cv_analysis and cv_analysis.get("analysis"):
+            parts.append(f"Analyse du profil (extrait du CV réel): {cv_analysis['analysis']}")
+
         return "\n".join(parts)
 
     def _build_job_text(self, job: Job) -> str:
@@ -196,22 +273,43 @@ class DocumentGenerator:
         return "\n".join(parts)
 
     def _call_llm(self, prompt: str, system_prompt: str, max_tokens: int = 2048) -> str:
-        try:
-            response = self._client.chat.completions.create(
-                model=settings.llm_model_id,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": prompt},
-                ],
-                temperature=0.3,
-                max_tokens=max_tokens,
-            )
-            return response.choices[0].message.content or ""
-        except Exception:
-            logger.exception("LLM call failed during document generation")
-            raise DocumentGenerationError(
-                "Le service IA est temporairement indisponible."
-            ) from None
+        import time
+
+        from openai import RateLimitError
+
+        max_retries = 3
+        base_delay = 2.0
+
+        for attempt in range(max_retries):
+            try:
+                response = self._client.chat.completions.create(
+                    model=settings.llm_model_id,
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": prompt},
+                    ],
+                    temperature=0.3,
+                    max_tokens=max_tokens,
+                )
+                return response.choices[0].message.content or ""
+            except RateLimitError:
+                if attempt < max_retries - 1:
+                    delay = base_delay * (2**attempt)
+                    logger.warning(
+                        f"RateLimitError. Retrying in {delay}s (attempt {attempt + 1}/{max_retries})..."
+                    )
+                    time.sleep(delay)
+                else:
+                    logger.exception("LLM call failed after retries due to RateLimitError")
+                    raise DocumentGenerationError(
+                        "Le service IA est très sollicité. Veuillez réessayer dans quelques minutes."
+                    ) from None
+            except Exception:
+                logger.exception("LLM call failed during document generation")
+                raise DocumentGenerationError(
+                    "Le service IA est temporairement indisponible."
+                ) from None
+        return ""
 
     def _parse_json(self, content: str) -> dict | None:
         try:
@@ -226,8 +324,17 @@ class DocumentGenerator:
                 pass
         return None
 
-    def generate_cv_content(self, user: User, job: Job) -> GeneratedCV:
-        profile_text = self._build_profile_text(user)
+    def generate_cv_content(
+        self, user: User, job: Job, cv_analysis: dict | None = None
+    ) -> GeneratedCV:
+        """Génère le contenu structuré du CV via LLM.
+
+        Args:
+            user: Profil utilisateur.
+            job: Offre d'emploi cible.
+            cv_analysis: Analyse du vrai CV uploadé (optionnel mais fortement recommandé).
+        """
+        profile_text = self._build_profile_text(user, cv_analysis=cv_analysis)
         job_text = self._build_job_text(job)
         prompt = CV_GENERATION_PROMPT.format(profile=profile_text, job=job_text)
 
@@ -249,9 +356,21 @@ class DocumentGenerator:
         )
 
     def generate_cover_letter_content(
-        self, user: User, job: Job, match_analysis: str | None = None
+        self,
+        user: User,
+        job: Job,
+        match_analysis: str | None = None,
+        cv_analysis: dict | None = None,
     ) -> GeneratedCoverLetter:
-        profile_text = self._build_profile_text(user)
+        """Génère le contenu de la lettre de motivation via LLM.
+
+        Args:
+            user: Profil utilisateur.
+            job: Offre d'emploi cible.
+            match_analysis: Analyse de correspondance profil/poste (optionnel).
+            cv_analysis: Analyse du vrai CV uploadé (optionnel mais fortement recommandé).
+        """
+        profile_text = self._build_profile_text(user, cv_analysis=cv_analysis)
         job_text = self._build_job_text(job)
         prompt = COVER_LETTER_PROMPT.format(
             profile=profile_text,
@@ -513,6 +632,8 @@ class DocumentGenerator:
         if FONT_PATH and BOLD_FONT_PATH:
             pdf.add_font("DejaVu", "", FONT_PATH, uni=True)
             pdf.add_font("DejaVu", "B", BOLD_FONT_PATH, uni=True)
+            if ITALIC_FONT_PATH:
+                pdf.add_font("DejaVu", "I", ITALIC_FONT_PATH, uni=True)
         else:
             logger.warning("DejaVu fonts not found, using built-in Helvetica")
 
@@ -569,7 +690,6 @@ class DocumentGenerator:
 
                 pdf.set_font(PDF_FONT, "", 10)
                 for bullet in exp.get("bullets", []):
-                    pdf.cell(5)
                     pdf.multi_cell(0, 5, f"- {bullet}")
                 pdf.ln(2)
 
@@ -603,7 +723,6 @@ class DocumentGenerator:
             self._pdf_section(pdf, "Langues & Certifications")
             pdf.set_font(PDF_FONT, "", 10)
             for item in certs_and_langs:
-                pdf.cell(5)
                 pdf.multi_cell(0, 5.5, f"- {item}")
             pdf.ln(2)
 
@@ -623,6 +742,10 @@ class DocumentGenerator:
         if FONT_PATH and BOLD_FONT_PATH:
             pdf.add_font("DejaVu", "", FONT_PATH, uni=True)
             pdf.add_font("DejaVu", "B", BOLD_FONT_PATH, uni=True)
+            if ITALIC_FONT_PATH:
+                pdf.add_font("DejaVu", "I", ITALIC_FONT_PATH, uni=True)
+        else:
+            logger.warning("DejaVu fonts not found, using built-in Helvetica")
 
         today = datetime.now().strftime("%d %B %Y")
         pdf.set_font(PDF_FONT, "", 10)
@@ -665,14 +788,34 @@ class DocumentGenerator:
         pdf.ln(3)
         pdf.set_text_color(0, 0, 0)
 
-    def generate_cv(self, user: User, job: Job, fmt: str = "docx") -> tuple[BytesIO, str]:
+    def generate_cv(
+        self,
+        user: User,
+        job: Job,
+        fmt: str = "docx",
+        cv_analysis: dict | None = None,
+    ) -> tuple[BytesIO, str]:
+        """Génère un CV ATS-optimisé.
+
+        Args:
+            user: Profil utilisateur.
+            job: Offre d'emploi cible.
+            fmt: Format de sortie ('docx' ou 'pdf').
+            cv_analysis: Analyse du vrai CV uploadé — si fourni, le contenu généré
+                         sera fidèle au vrai parcours de l'utilisateur.
+        """
         logger.info(
-            f"Génération du CV pour {user.name} (user_id={user.id}) - Poste: {job.title} (job_id={job.id})"
+            "Génération du CV pour %s (user_id=%s) - Poste: %s (job_id=%s)%s",
+            user.name,
+            user.id,
+            job.title,
+            job.id,
+            " [avec analyse CV]" if cv_analysis else " [sans CV uploadé]",
         )
-        cv = self.generate_cv_content(user, job)
-        filename = f"CV_{user.name.replace(' ', '_')}_{job.title.replace(' ', '_')}".replace(
-            "/", "_"
-        )[:80]
+        cv = self.generate_cv_content(user, job, cv_analysis=cv_analysis)
+        name_clean = self._sanitize_filename(user.name)
+        job_clean = self._sanitize_filename(job.title)
+        filename = f"CV_{name_clean}_{job_clean}"[:80]
 
         if fmt == "pdf":
             buf = self.build_cv_pdf(cv, user, job)
@@ -682,15 +825,36 @@ class DocumentGenerator:
         return buf, f"{filename}.docx"
 
     def generate_cover_letter(
-        self, user: User, job: Job, fmt: str = "docx", match_analysis: str | None = None
+        self,
+        user: User,
+        job: Job,
+        fmt: str = "docx",
+        match_analysis: str | None = None,
+        cv_analysis: dict | None = None,
     ) -> tuple[BytesIO, str]:
+        """Génère une lettre de motivation.
+
+        Args:
+            user: Profil utilisateur.
+            job: Offre d'emploi cible.
+            fmt: Format de sortie ('docx' ou 'pdf').
+            match_analysis: Analyse de correspondance profil/poste.
+            cv_analysis: Analyse du vrai CV uploadé.
+        """
         logger.info(
-            f"Génération de la lettre de motivation pour {user.name} (user_id={user.id}) - Poste: {job.title} (job_id={job.id})"
+            "Génération de la lettre pour %s (user_id=%s) - Poste: %s (job_id=%s)%s",
+            user.name,
+            user.id,
+            job.title,
+            job.id,
+            " [avec analyse CV]" if cv_analysis else " [sans CV uploadé]",
         )
-        letter = self.generate_cover_letter_content(user, job, match_analysis)
-        filename = f"Lettre_Motivation_{user.name.replace(' ', '_')}_{job.title.replace(' ', '_')}".replace(
-            "/", "_"
-        )[:80]
+        letter = self.generate_cover_letter_content(
+            user, job, match_analysis, cv_analysis=cv_analysis
+        )
+        name_clean = self._sanitize_filename(user.name)
+        job_clean = self._sanitize_filename(job.title)
+        filename = f"Lettre_Motivation_{name_clean}_{job_clean}"[:80]
 
         if fmt == "pdf":
             buf = self.build_cover_letter_pdf(letter, user, job)

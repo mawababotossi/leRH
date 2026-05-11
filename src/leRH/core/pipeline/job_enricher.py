@@ -3,8 +3,9 @@ from __future__ import annotations
 import json
 import logging
 import re
+import time
 
-from openai import OpenAI
+from openai import OpenAI, RateLimitError
 
 from leRH.config import settings
 from leRH.core.scraping.types import ScrapedJob
@@ -42,31 +43,50 @@ class JobEnricher:
         )
 
     def enrich(self, job: ScrapedJob) -> ScrapedJob:
-        try:
-            prompt = ENRICH_PROMPT.format(
-                title=job.title,
-                company=job.company or "",
-                city=job.city or "",
-                description=job.description[:3000],
-            )
-            response = self._client.chat.completions.create(
-                model=settings.llm_model_id,
-                messages=[
-                    {
-                        "role": "system",
-                        "content": "Tu extrais des informations structurées d'offres d'emploi. Réponds uniquement en JSON.",
-                    },
-                    {"role": "user", "content": prompt},
-                ],
-                temperature=0.05,
-                max_tokens=512,
-            )
-            content = response.choices[0].message.content or ""
-            data = self._parse_json(content)
-            if data:
-                job = self._apply(job, data)
-        except Exception:
-            logger.exception("Enrichment failed for %s", job.title[:60])
+        prompt = ENRICH_PROMPT.format(
+            title=job.title,
+            company=job.company or "",
+            city=job.city or "",
+            description=job.description[:3000],
+        )
+
+        max_retries = 3
+        base_delay = 2.0
+
+        for attempt in range(max_retries):
+            try:
+                response = self._client.chat.completions.create(
+                    model=settings.llm_model_id,
+                    messages=[
+                        {
+                            "role": "system",
+                            "content": "Tu extrais des informations structurées d'offres d'emploi. Réponds uniquement en JSON.",
+                        },
+                        {"role": "user", "content": prompt},
+                    ],
+                    temperature=0.05,
+                    max_tokens=512,
+                )
+                content = response.choices[0].message.content or ""
+                data = self._parse_json(content)
+                if data:
+                    job = self._apply(job, data)
+                break
+            except RateLimitError:
+                if attempt < max_retries - 1:
+                    delay = base_delay * (2**attempt)
+                    logger.warning(
+                        f"RateLimitError in enrich. Retrying in {delay}s (attempt {attempt + 1}/{max_retries})..."
+                    )
+                    time.sleep(delay)
+                else:
+                    logger.exception(
+                        "Enrichment failed for %s due to RateLimitError after retries",
+                        job.title[:60],
+                    )
+            except Exception:
+                logger.exception("Enrichment failed for %s", job.title[:60])
+                break
         return job
 
     @staticmethod

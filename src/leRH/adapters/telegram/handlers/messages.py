@@ -2,10 +2,9 @@ from __future__ import annotations
 
 import logging
 
-from telegram import ReplyKeyboardMarkup, Update
+from telegram import Update
 from telegram.ext import ContextTypes
 
-from leRH.adapters.telegram.handlers.conversation import COUNTRIES
 from leRH.core.assistants.manager import Assistant
 from leRH.db.base import async_session_factory
 from leRH.db.repository import JobRepository, MessageRepository, UserRepository
@@ -37,17 +36,11 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
     user = await _get_user(tg_user)
 
-    if not user or user.conversation_state == "new":
-        async with async_session_factory() as session:
-            repo = UserRepository(session)
-            user = user or await repo.create(telegram_id=tg_user.id, name=tg_user.first_name or "")
-            user.conversation_state = "awaiting_country"
-            await session.commit()
+    if not user or user.conversation_state in ("new", "awaiting_name"):
+        # L'utilisateur n'a pas encore fait /start ou le profil est incomplet.
+        # On répond avec un message incitatif sans créer de doublon.
         await update.message.reply_text(
-            "👋 Bonjour ! Je suis Koffi, votre assistant emploi.\nDans quel pays habitez-vous ?",
-            reply_markup=ReplyKeyboardMarkup(
-                COUNTRIES, one_time_keyboard=True, input_field_placeholder="Togo"
-            ),
+            "👋 Bienvenue ! Pour commencer, tapez /start pour créer votre profil."
         )
         return
 

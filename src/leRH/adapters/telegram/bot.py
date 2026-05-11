@@ -14,7 +14,12 @@ from leRH.adapters.telegram.handlers.conversation import (
     activity,
     cancel,
     country,
+    diploma,
+    show_profile,
+    skills,
     skip_activity,
+    skip_diploma,
+    skip_skills,
     start,
 )
 from leRH.adapters.telegram.handlers.documents import handle_document
@@ -43,17 +48,29 @@ def build_application():
 
     # Conversation handler
     conv = ConversationHandler(
-        entry_points=[CommandHandler("start", start)],
+        entry_points=[
+            CommandHandler("start", start),
+            CommandHandler("modifier", start),
+        ],
         states={
             settings.COUNTRY: [MessageHandler(filters.TEXT & ~filters.COMMAND, country)],
             settings.ACTIVITY: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, activity),
                 CommandHandler("skip", skip_activity),
             ],
+            settings.SKILLS: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, skills),
+                CommandHandler("skip", skip_skills),
+            ],
+            settings.DIPLOMA: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, diploma),
+                CommandHandler("skip", skip_diploma),
+            ],
         },
         fallbacks=[CommandHandler("cancel", cancel)],
     )
     app.add_handler(conv)
+    app.add_handler(CommandHandler("profil", show_profile))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.add_handler(MessageHandler(filters.VOICE, handle_voice))
     app.add_handler(MessageHandler(filters.AUDIO, handle_audio))

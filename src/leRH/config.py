@@ -34,6 +34,8 @@ class Settings(BaseSettings):
 
     COUNTRY: ClassVar[int] = 0
     ACTIVITY: ClassVar[int] = 1
+    SKILLS: ClassVar[int] = 2
+    DIPLOMA: ClassVar[int] = 3
 
 
 settings = Settings()

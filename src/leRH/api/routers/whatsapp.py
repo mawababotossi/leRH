@@ -26,15 +26,61 @@ def _clean_jid(raw: str) -> str:
 
 
 WELCOME_INTRO = (
-    "Bienvenue sur leRH ! 🎯 Je suis Koffi, votre assistant emploi.\n\nQuel est votre prénom ?"
+    "Bienvenue sur leRH ! 🎯 Je suis Koffi, votre assistant emploi personnalisé.\n\n"
+    "Je vais vous aider à trouver des offres d'emploi et à générer des CV et lettres "
+    "de motivation adaptés à votre profil.\n\n"
+    "Pour commencer, quel est votre *prénom* ?"
 )
 
-COUNTRY_QUESTION = "Merci ! Dans quel pays habitez-vous ?"
-ACTIVITY_QUESTION = "Parfait ! Quelle est votre profession ou activité ?"
+# Salutations courantes à ne pas interpréter comme un prénom
+_GREETINGS = {
+    "bonjour",
+    "bonsoir",
+    "salut",
+    "hello",
+    "hi",
+    "hey",
+    "allo",
+    "allô",
+    "coucou",
+    "yo",
+    "bjr",
+    "bsr",
+    "slt",
+    "salu",
+    "wesh",
+    "hola",
+}
+
+
+def _looks_like_greeting(text: str) -> bool:
+    """Retourne True si le texte ressemble à une salutation plutôt qu'un prénom."""
+    normalized = text.strip().lower().rstrip("!?.")
+    if normalized in _GREETINGS:
+        return True
+    # Un prénom ne devrait pas dépasser 50 caractères ni contenir plusieurs mots
+    # de type salutation
+    words = normalized.split()
+    if len(text) > 50:
+        return True
+    return len(words) > 1 and all(w in _GREETINGS for w in words)
+
+
+COUNTRY_QUESTION = (
+    "Merci *{name}* ! Dans quel pays habitez-vous ?\n(ex: Togo, Bénin, Côte d'Ivoire)"
+)
+ACTIVITY_QUESTION = "Parfait ! Quelle est votre profession ou domaine d'activité ?"
+SKILLS_QUESTION = (
+    "Très bien. Quelles sont vos 3 compétences principales ?\n"
+    "(ex: Python, Vente, Comptabilité, Gestion d'équipe)"
+)
+DIPLOMA_QUESTION = "D'accord. Quel est votre dernier diplôme ou niveau d'études ?"
 READY_MESSAGE = (
-    "Super ! Votre profil est complet. Vous pouvez maintenant :\n"
-    "• M'envoyer un message pour discuter\n"
-    "• M'envoyer un CV (PDF) pour analyse\n\n"
+    "Super *{name}*, votre profil de base est prêt ! 🎉\n\n"
+    "Vous pouvez maintenant :\n"
+    "• Envoyer votre *CV en PDF* pour que je l'analyse et personnalise vos documents\n"
+    "• Me poser des questions sur les offres d'emploi\n"
+    "• Demander la génération d'un CV ou d'une lettre de motivation\n\n"
     "Comment puis-je vous aider ?"
 )
 
@@ -70,6 +116,12 @@ class ReplyResponse(BaseModel):
 
 
 async def get_or_create_user(db: AsyncSession, whatsapp_id: str) -> tuple:
+    """Récupère ou crée un utilisateur WhatsApp.
+
+    Un nouvel utilisateur est créé avec l'état 'new' (non 'awaiting_name') pour
+    que le premier message entrant déclenche l'envoi de WELCOME_INTRO sans
+    consommer le texte comme prénom.
+    """
     clean_id = _clean_jid(whatsapp_id)
     repo = UserRepository(db)
     user = await repo.get_by_whatsapp(clean_id)
@@ -103,12 +155,31 @@ async def process_conversation(
     try:
         match state:
             case "new":
-                await memory.add_message("user", text)
-                user.name = text.strip()
+                # Premier contact : envoyer le message de bienvenue.
+                # Ne pas sauvegarder le texte reçu comme prénom — c'est
+                # probablement une salutation ("Bonjour", "Salut"...).
+                user.conversation_state = "awaiting_name"
+                await db.flush()
+                await memory.add_message("assistant", WELCOME_INTRO)
+                return WELCOME_INTRO
+
+            case "awaiting_name":
+                # L'utilisateur répond au "Quel est votre prénom ?"
+                name_candidate = text.strip()
+                if _looks_like_greeting(name_candidate):
+                    retry = (
+                        "Je n'ai pas bien compris votre prénom 😊\n"
+                        "Pouvez-vous me donner juste votre prénom ? "
+                        "(ex: Kofi, Amina, Jean-Pierre)"
+                    )
+                    await memory.add_message("assistant", retry)
+                    return retry
+                user.name = name_candidate
                 user.conversation_state = "awaiting_country"
                 await db.flush()
-                await memory.add_message("assistant", COUNTRY_QUESTION)
-                return COUNTRY_QUESTION
+                country_q = COUNTRY_QUESTION.format(name=name_candidate)
+                await memory.add_message("assistant", country_q)
+                return country_q
 
             case "awaiting_country":
                 user.country = text.strip()
@@ -119,10 +190,28 @@ async def process_conversation(
 
             case "awaiting_activity":
                 user.activity = text.strip()
+                user.conversation_state = "awaiting_skills"
+                await db.flush()
+                await memory.add_message("assistant", SKILLS_QUESTION)
+                return SKILLS_QUESTION
+
+            case "awaiting_skills":
+                # On parse les compétences séparées par des virgules
+                raw_skills = text.strip()
+                skills_list = [s.strip() for s in raw_skills.split(",") if s.strip()]
+                user.skills = skills_list
+                user.conversation_state = "awaiting_diploma"
+                await db.flush()
+                await memory.add_message("assistant", DIPLOMA_QUESTION)
+                return DIPLOMA_QUESTION
+
+            case "awaiting_diploma":
+                user.diploma = text.strip()
                 user.conversation_state = "ready"
                 await db.flush()
-                await memory.add_message("assistant", READY_MESSAGE)
-                return READY_MESSAGE
+                ready_msg = READY_MESSAGE.format(name=user.name or "")
+                await memory.add_message("assistant", ready_msg)
+                return ready_msg
 
             case "ready":
                 await memory.add_message("user", text)
@@ -148,6 +237,7 @@ async def process_conversation(
                 return reply
 
             case _:
+                # État inconnu ou corrompu : repartir à zéro proprement.
                 user.conversation_state = "new"
                 await db.flush()
                 return WELCOME_INTRO

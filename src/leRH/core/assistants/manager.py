@@ -192,7 +192,7 @@ class Assistant:
                     "description": (
                         "Genere un CV personnalise et optimise ATS pour l'utilisateur"
                         " adapte a une offre d'emploi specifique."
-                        " Cout: 5 credits. L'utilisateur doit avoir assez de credits."
+                        " Cout: 5 credits. L'utilisateur doit confirmer son profil avant generation."
                     ),
                     "parameters": {
                         "type": "object",
@@ -202,6 +202,13 @@ class Assistant:
                                 "description": (
                                     "Titre exact ou approximatif de l'offre d'emploi"
                                     " pour laquelle generer le CV."
+                                ),
+                            },
+                            "confirmed": {
+                                "type": "boolean",
+                                "description": (
+                                    "Indique si l'utilisateur a confirme que les informations"
+                                    " de son profil sont correctes pour la generation."
                                 ),
                             },
                         },
@@ -219,7 +226,7 @@ class Assistant:
                     "description": (
                         "Genere une lettre de motivation personnalisee pour l'utilisateur"
                         " adaptee a une offre d'emploi specifique."
-                        " Cout: 3 credits. L'utilisateur doit avoir assez de credits."
+                        " Cout: 3 credits. L'utilisateur doit confirmer son profil avant generation."
                     ),
                     "parameters": {
                         "type": "object",
@@ -229,6 +236,13 @@ class Assistant:
                                 "description": (
                                     "Titre exact ou approximatif de l'offre d'emploi"
                                     " pour laquelle generer la lettre."
+                                ),
+                            },
+                            "confirmed": {
+                                "type": "boolean",
+                                "description": (
+                                    "Indique si l'utilisateur a confirme que les informations"
+                                    " de son profil sont correctes pour la generation."
                                 ),
                             },
                         },
@@ -281,6 +295,38 @@ class Assistant:
                                     " pertinentes mais moins nombreuses."
                                 ),
                             },
+                        },
+                        "required": [],
+                    },
+                },
+            }
+        )
+
+        tools.append(
+            {
+                "type": "function",
+                "function": {
+                    "name": "update_profile",
+                    "description": (
+                        "Met a jour les informations du profil de l'utilisateur."
+                        " Utilise cette fonction quand l'utilisateur souhaite modifier"
+                        " son nom, pays, activite, competences ou diplome."
+                    ),
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "name": {"type": "string", "description": "Nouveau nom"},
+                            "country": {"type": "string", "description": "Nouveau pays"},
+                            "activity": {
+                                "type": "string",
+                                "description": "Nouvelle activite ou profession",
+                            },
+                            "skills": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "description": "Liste des competences",
+                            },
+                            "diploma": {"type": "string", "description": "Nouveau diplome"},
                         },
                         "required": [],
                     },
@@ -465,6 +511,9 @@ class Assistant:
         if func_name == "subscribe_job_alerts":
             return await self._handle_subscribe_tool(args)
 
+        if func_name == "update_profile":
+            return await self._handle_update_profile_tool(args)
+
         return json.dumps({"error": f"Unknown tool: {func_name}"})
 
     def _handle_check_document_tool(self) -> str:
@@ -526,11 +575,40 @@ class Assistant:
                 }
             )
 
+        confirmed = args.get("confirmed", False)
         doc_type = "CV" if func_name == "generate_cv" else "lettre de motivation"
+
+        if not confirmed:
+            # On demande confirmation en montrant les données actuelles
+            profile_summary = {
+                "Nom": self.name,
+                "Pays": self.country,
+                "Activité": self.activity or "Non renseignée",
+                "Compétences": self.skills or [],
+                "Diplôme": self.diploma or "Non renseigné",
+            }
+            return json.dumps(
+                {
+                    "confirmation_required": True,
+                    "message": (
+                        f"Avant de générer votre {doc_type} (coût: {cost} crédits), "
+                        "veuillez confirmer que ces informations de votre profil sont correctes :\n"
+                        f"- Nom : {profile_summary['Nom']}\n"
+                        f"- Pays : {profile_summary['Pays']}\n"
+                        f"- Métier/Activité : {profile_summary['Activité']}\n"
+                        f"- Compétences : {', '.join(profile_summary['Compétences']) if profile_summary['Compétences'] else '—'}\n"
+                        f"- Diplôme : {profile_summary['Diplôme']}\n\n"
+                        "Est-ce correct ? (Vous pouvez aussi me demander de modifier une information)"
+                    ),
+                    "profile_data": profile_summary,
+                },
+                ensure_ascii=False,
+            )
+
         logger.info(
             "Background task launched: %s for user=%s job=%s", doc_type, self.user_id, job.title
         )
-        asyncio.create_task(
+        task = asyncio.create_task(
             generate_document_background(
                 user_id=self.user_id,
                 job=job,
@@ -540,6 +618,7 @@ class Assistant:
                 chat_id=self.chat_id or self.user_id,
             )
         )
+        task.add_done_callback(lambda t: t.exception() if not t.cancelled() and t.done() else None)
 
         return json.dumps(
             {
@@ -622,6 +701,48 @@ class Assistant:
                 "credits_awarded": SUBSCRIPTION_BONUS,
             }
         )
+
+    async def _handle_update_profile_tool(self, args: dict) -> str:
+        if not self.user_id:
+            return json.dumps({"error": "Utilisateur non identifié."})
+
+        # Filtrer les arguments pour ne garder que ceux qui ne sont pas None
+        updates = {k: v for k, v in args.items() if v is not None}
+        if not updates:
+            return json.dumps({"error": "Aucune information à mettre à jour."})
+
+        try:
+            if self._db_session is not None:
+                user_repo = UserRepository(self._db_session)
+                user = await user_repo.get_by_id(self.user_id)
+                if not user:
+                    return json.dumps({"error": "Utilisateur non trouvé."})
+                await user_repo.update(user, **updates)
+                # On met à jour l'instance Assistant également
+                for k, v in updates.items():
+                    setattr(self, k, v)
+            else:
+                async with async_session_factory() as session:
+                    user_repo = UserRepository(session)
+                    user = await user_repo.get_by_id(self.user_id)
+                    if not user:
+                        return json.dumps({"error": "Utilisateur non trouvé."})
+                    await user_repo.update(user, **updates)
+                    await session.commit()
+                    for k, v in updates.items():
+                        setattr(self, k, v)
+
+            return json.dumps(
+                {
+                    "success": True,
+                    "message": "Votre profil a été mis à jour avec succès !",
+                    "updated_fields": list(updates.keys()),
+                },
+                ensure_ascii=False,
+            )
+        except Exception as e:
+            logger.exception("Failed to update profile via tool")
+            return json.dumps({"error": f"Erreur lors de la mise à jour : {str(e)}"})
 
     async def _call_with_tools(self, messages: list[dict]) -> str:
         tools = self._build_tools()

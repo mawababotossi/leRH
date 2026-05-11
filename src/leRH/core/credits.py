@@ -46,7 +46,13 @@ class CreditManager:
         return user.credits if user else 0
 
     async def _deduct(
-        self, session: AsyncSession, user_id: str, amount: int, reason: str = ""
+        self,
+        session: AsyncSession,
+        user_id: str,
+        amount: int,
+        reason: str = "",
+        *,
+        owned: bool = False,
     ) -> CreditResult:
         user = await session.get(User, user_id)
         if not user:
@@ -63,7 +69,8 @@ class CreditManager:
 
         user.credits = current - amount
         await session.flush()
-        await session.commit()
+        if owned:
+            await session.commit()
         logger.info(
             "Credits deducted: user=%s amount=%d reason=%s remaining=%d",
             user_id,
@@ -76,13 +83,51 @@ class CreditManager:
     async def deduct(
         self, user_id: str, amount: int, reason: str = "", session: AsyncSession | None = None
     ) -> CreditResult:
+        from sqlalchemy import update
+
         if session is not None:
-            return await self._deduct(session, user_id, amount, reason)
+            result = await session.execute(
+                update(User)
+                .where(User.id == user_id, User.credits >= amount)
+                .values(credits=User.credits - amount)
+                .returning(User.credits)
+            )
+            row = result.fetchone()
+            if row is None:
+                user = await session.get(User, user_id)
+                current = user.credits if user else 0
+                return CreditResult(
+                    False,
+                    current,
+                    f"Crédits insuffisants ({current}/{amount}).",
+                )
+            logger.info("Credits deducted: user=%s amount=%d reason=%s", user_id, amount, reason)
+            return CreditResult(True, row[0], f"Il vous reste {row[0]} crédits.")
+
         async with DBLock(), async_session_factory() as s:
-            return await self._deduct(s, user_id, amount, reason)
+            result = await s.execute(
+                update(User)
+                .where(User.id == user_id, User.credits >= amount)
+                .values(credits=User.credits - amount)
+                .returning(User.credits)
+            )
+            row = result.fetchone()
+            await s.commit()
+            if row is None:
+                user = await s.get(User, user_id)
+                current = user.credits if user else 0
+                return CreditResult(False, current, f"Crédits insuffisants ({current}/{amount}).")
+            logger.info("Credits deducted: user=%s amount=%d reason=%s", user_id, amount, reason)
+            return CreditResult(True, row[0], f"Il vous reste {row[0]} crédits.")
 
     async def _add(
-        self, session: AsyncSession, user_id: str, amount: int, reason: str = ""
+        self,
+        session: AsyncSession,
+        user_id: str,
+        amount: int,
+        reason: str = "",
+        *,
+        owned: bool = False,
     ) -> CreditResult:
         user = await session.get(User, user_id)
         if not user:
@@ -90,7 +135,8 @@ class CreditManager:
 
         user.credits = (user.credits or 0) + amount
         await session.flush()
-        await session.commit()
+        if owned:
+            await session.commit()
         logger.info(
             "Credits added: user=%s amount=%d reason=%s total=%d",
             user_id,
@@ -104,6 +150,6 @@ class CreditManager:
         self, user_id: str, amount: int, reason: str = "", session: AsyncSession | None = None
     ) -> CreditResult:
         if session is not None:
-            return await self._add(session, user_id, amount, reason)
+            return await self._add(session, user_id, amount, reason, owned=False)
         async with DBLock(), async_session_factory() as s:
-            return await self._add(s, user_id, amount, reason)
+            return await self._add(s, user_id, amount, reason, owned=True)

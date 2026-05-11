@@ -30,7 +30,7 @@ class UserResponse(BaseModel):
     telegram_id: int | None = None
     whatsapp_id: str | None = None
     verified: bool
-    credits: int = 0
+    credits: int = 10
     created_at: datetime
 
     model_config = {"from_attributes": True}

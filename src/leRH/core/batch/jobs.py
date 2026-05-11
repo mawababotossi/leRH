@@ -10,6 +10,8 @@ from leRH.core.scraping.emploi_tg import EmploiTgScraper
 from leRH.db.base import async_session_factory
 from leRH.db.repository import CVRepository, JobRepository, SubscriptionRepository, UserRepository
 
+SYSTEM_USER_ID = "system_agg"
+
 logger = logging.getLogger(__name__)
 
 
@@ -33,7 +35,7 @@ async def scrape_and_store() -> int:
                 continue
 
             await repo.create(
-                recruiter_id="external",
+                recruiter_id=SYSTEM_USER_ID,
                 title=job.title,
                 description=job.description[:5000],
                 company=job.company,

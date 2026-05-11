@@ -1,15 +1,9 @@
 /**
  * leRH — WhatsApp Bot (Baileys)
- *
- * Inspiré de l'implémentation ClawGate.
- * - fetchLatestBaileysVersion pour la compatibilité protocole
- * - Message store pour les retry de chiffrement
- * - Anti-loop via zero-width space
- * - Reconnexion automatique
  */
 
 import { Boom } from "@hapi/boom";
-import { downloadContentFromMessage } from "@whiskeysockets/baileys";
+import { downloadContentFromMessage, jidNormalizedUser } from "@whiskeysockets/baileys";
 import qrcode from "qrcode-terminal";
 import pino from "pino";
 import { apiRequest } from "./api-client.js";
@@ -31,12 +25,26 @@ const messageStore = new Map<string, any>();
 let connectionOpenTime = 0;
 const MIN_STABLE_CONNECTION_MS = 10_000;
 
-function normalizeJid(id: string): string {
-  if (!id) return "";
-  if (id.includes("@g.us") || id.includes("@lid") || id.includes("@s.whatsapp.net")) return id;
-  const clean = id.replace(/\+/g, "").trim();
-  return `${clean}@s.whatsapp.net`;
+// Nettoyage periodique pour eviter la fuite memoire
+const MAX_PROCESSED_IDS = 2000;
+function pruneProcessedMessages() {
+  if (processedMessages.size > MAX_PROCESSED_IDS) {
+    const toDelete = [...processedMessages].slice(0, processedMessages.size - MAX_PROCESSED_IDS);
+    toDelete.forEach((id) => processedMessages.delete(id));
+  }
 }
+
+/**
+ * URL de base de l'API Python — sans slash final, sans suffixe /api.
+ * Exemples valides : "http://localhost:8000" ou "http://api:8000"
+ */
+function getBaseUrl(): string {
+  const raw = process.env.LERH_API_URL || "http://localhost:8000";
+  return raw.replace(/\/api\/?$/, "").replace(/\/$/, "");
+}
+
+const BASE_URL = getBaseUrl();
+logger.info({ BASE_URL }, "API base URL resolved");
 
 function getMessageText(msg: any): string {
   return (
@@ -65,28 +73,24 @@ async function sendPresence(jid: string): Promise<void> {
   try {
     await sock.presenceSubscribe(jid);
     await sock.sendPresenceUpdate("composing", jid);
-  } catch {
-    /* ignore */
-  }
+  } catch { /* ignore */ }
 }
 
 async function handleMessage(msg: any): Promise<void> {
   if (!msg.message) return;
-
-  // Anti-loop: ignorer nos propres messages (sauf self-chat via @lid)
   if (msg.key?.fromMe && !msg.key?.remoteJid?.endsWith("@lid")) return;
 
   const msgId = msg.key?.id;
   if (!msgId || processedMessages.has(msgId)) return;
   processedMessages.add(msgId);
+  pruneProcessedMessages();
 
-  const jid: string = msg.key?.remoteJid ?? "";
-  if (!jid) return;
+  const rawJid: string = msg.key?.remoteJid ?? "";
+  if (!rawJid) return;
+  const jid = jidNormalizedUser(rawJid);
 
   const textBody = getMessageText(msg);
   const isVoice = isVoiceMessage(msg);
-
-  // Anti-loop: ignorer les messages qu'on a envoyés (marqués par zero-width space)
   if (textBody.endsWith("\u200B")) return;
 
   const isDoc = isDocumentMessage(msg);
@@ -100,8 +104,7 @@ async function handleMessage(msg: any): Promise<void> {
       const stream = await downloadContentFromMessage(msg.message.documentMessage, "document");
       const chunks: Buffer[] = [];
       for await (const chunk of stream) chunks.push(chunk);
-      const buffer = Buffer.concat(chunks);
-      const base64 = buffer.toString("base64");
+      const base64 = Buffer.concat(chunks).toString("base64");
 
       const result = await apiRequest<{ reply: string }>("/api/whatsapp/document", {
         method: "POST",
@@ -113,21 +116,14 @@ async function handleMessage(msg: any): Promise<void> {
         }),
       });
 
-      const replyText = result.reply + "\u200B";
-      const sent = await sock.sendMessage(jid, { text: replyText });
-      if (sent?.key?.id && sent?.message) messageStore.set(sent.key.id, sent.message);
+      await sock.sendMessage(jid, { text: result.reply + "\u200B" });
     } else if (isDoc) {
-      // Document non-PDF
-      const sent = await sock.sendMessage(jid, {
-        text: "Veuillez envoyer votre CV au format PDF.\u200B",
-      });
-      if (sent?.key?.id && sent?.message) messageStore.set(sent.key.id, sent.message);
+      await sock.sendMessage(jid, { text: "Veuillez envoyer votre CV au format PDF.\u200B" });
     } else if (isVoice) {
       const stream = await downloadContentFromMessage(msg.message.audioMessage, "audio");
       const chunks: Buffer[] = [];
       for await (const chunk of stream) chunks.push(chunk);
-      const buffer = Buffer.concat(chunks);
-      const base64 = buffer.toString("base64");
+      const base64 = Buffer.concat(chunks).toString("base64");
 
       const result = await apiRequest<{ reply: string }>("/api/whatsapp/voice", {
         method: "POST",
@@ -138,69 +134,154 @@ async function handleMessage(msg: any): Promise<void> {
         }),
       });
 
-      const replyText = result.reply + "\u200B";
-      const sent = await sock.sendMessage(jid, { text: replyText });
-      if (sent?.key?.id && sent?.message) messageStore.set(sent.key.id, sent.message);
+      await sock.sendMessage(jid, { text: result.reply + "\u200B" });
     } else if (textBody) {
-      const endpoint = textBody.startsWith("/start") ? "/api/whatsapp/start" : "/api/whatsapp/message";
-      logger.info({ endpoint }, "Calling API");
-      try {
-        const result = await apiRequest<{ reply: string }>(endpoint, {
-          method: "POST",
-          body: JSON.stringify({ from: jid, text: textBody }),
-        });
-        logger.info("API response: %d chars", result.reply?.length || 0);
+      const endpoint = textBody.startsWith("/start")
+        ? "/api/whatsapp/start"
+        : "/api/whatsapp/message";
 
-        const replyText = result.reply + "\u200B";
-        const sent = await sock.sendMessage(jid, { text: replyText });
-        logger.info({ sentId: sent?.key?.id }, "Message sent");
-        if (sent?.key?.id && sent?.message) messageStore.set(sent.key.id, sent.message);
-      } catch (apiErr: any) {
-        logger.error({ err: apiErr?.message || apiErr }, "API call failed");
+      const result = await apiRequest<{ reply: string }>(endpoint, {
+        method: "POST",
+        body: JSON.stringify({ from: jid, text: textBody }),
+      });
+
+      const sentMsg = await sock.sendMessage(jid, { text: result.reply + "\u200B" });
+      if (sentMsg?.key?.id && sentMsg.message) {
+        messageStore.set(sentMsg.key.id, sentMsg.message);
       }
 
-      // Nettoyer le store
       if (messageStore.size > 500) {
         const firstKey = messageStore.keys().next().value;
         if (firstKey) messageStore.delete(firstKey);
       }
     }
 
-    try {
-      await sock.sendPresenceUpdate("paused", jid);
-    } catch {
-      /* ignore */
-    }
+    try { await sock.sendPresenceUpdate("paused", jid); } catch { /* ignore */ }
   } catch (err) {
     logger.error({ err }, "Error handling message");
     try {
-      const errText = "Désolé, une erreur s'est produite. Veuillez réessayer.\u200B";
-      const sent = await sock.sendMessage(jid, { text: errText });
-      if (sent?.key?.id && sent?.message) messageStore.set(sent.key.id, sent.message);
-    } catch {
-      /* ignore */
-    }
+      await sock.sendMessage(jid, {
+        text: "Désolé, une erreur s'est produite. Veuillez réessayer.\u200B",
+      });
+    } catch { /* ignore */ }
   }
 }
 
+// =============================================================================
+// ENVOI DE DOCUMENTS — explication de la syntaxe Baileys correcte
+// =============================================================================
+//
+// ERREURS COMMUNES avec Baileys pour les documents :
+//
+// ❌ MAUVAIS — caption dans le contenu (ignoré ou rejeté pour les documents) :
+//    sock.sendMessage(jid, { document: buf, fileName: "f.docx", caption: "..." })
+//
+// ❌ MAUVAIS — buffer brut sans vérification de taille :
+//    const buf = Buffer.from(await res.arrayBuffer())
+//    sock.sendMessage(jid, { document: buf, ... })
+//    → échoue silencieusement si buf est vide ou corrompu
+//
+// ✅ BON — URL directe, Baileys streame vers WA sans charger en mémoire :
+//    sock.sendMessage(jid, { document: { url: "http://..." }, fileName: "f.docx", mimetype: "..." })
+//
+// ✅ BON — caption en message texte séparé (toujours visible) :
+//    await sock.sendMessage(jid, { document: { url }, fileName, mimetype })
+//    await sock.sendMessage(jid, { text: "Votre CV est prêt !" })
+//
+// NOTE : l'URL passée à Baileys doit être accessible depuis le réseau
+//        du processus Node.js (pas depuis le navigateur de l'utilisateur).
+//        En Docker : utiliser le nom du service interne (ex: http://api:8000).
+// =============================================================================
+
+function getMimetype(filename: string): string {
+  if (filename.endsWith(".docx")) {
+    return "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+  }
+  if (filename.endsWith(".pdf")) {
+    return "application/pdf";
+  }
+  return "application/octet-stream";
+}
+
+/**
+ * Envoie un document via Baileys.
+ *
+ * Stratégie :
+ * 1. Passer l'URL directement à Baileys (recommandé, plus fiable).
+ *    Baileys streame le fichier depuis l'URL vers les serveurs WhatsApp.
+ * 2. Si ça échoue, télécharger le buffer et réessayer.
+ * 3. Envoyer la légende dans un message texte séparé (plus compatible).
+ */
+async function sendDocumentMessage(
+  jid: string,
+  documentUrl: string,
+  filename: string,
+  caption: string
+): Promise<void> {
+  const cleanFilename = filename.replace(/[^a-zA-Z0-9_\.]/g, "_");
+  const mimetype = getMimetype(cleanFilename);
+
+  logger.info({ jid, documentUrl, filename: cleanFilename, mimetype }, "Sending document via Buffer method");
+
+  try {
+    const fileRes = await fetch(documentUrl);
+    if (!fileRes.ok) {
+      throw new Error(
+        `Cannot download document: HTTP ${fileRes.status} from ${documentUrl}`
+      );
+    }
+
+    const arrayBuffer = await fileRes.arrayBuffer();
+    const buffer = Buffer.from(arrayBuffer);
+
+    const localLink = documentUrl.replace("localhost", "192.168.1.70");
+    const finalCaption = caption ? `${caption}\n\nLien de secours (si le fichier ne s'affiche pas) : ${localLink}` : `Lien de secours : ${localLink}`;
+
+    const sentMsg = await sock.sendMessage(jid, {
+      document: buffer,
+      mimetype,
+      fileName: cleanFilename,
+      caption: caption,
+    });
+    if (sentMsg?.key?.id && sentMsg.message) {
+      messageStore.set(sentMsg.key.id, sentMsg.message);
+    }
+
+    logger.info({ filename, bytes: buffer.length }, "Document sent successfully");
+    
+    // Fallback ABSOLU : Si WA drop le document + caption, ce message texte passera toujours
+    await new Promise((r) => setTimeout(r, 600));
+    const fallbackMsg = await sock.sendMessage(jid, { 
+      text: `Lien de secours (si le document ne s'affiche pas ci-dessus) :\n${localLink}\n\u200B` 
+    });
+    if (fallbackMsg?.key?.id && fallbackMsg.message) {
+      messageStore.set(fallbackMsg.key.id, fallbackMsg.message);
+    }
+
+  } catch (err: any) {
+    logger.error({ err: err?.message, documentUrl }, "Failed to send document");
+    throw err;
+  }
+}
+
+// =============================================================================
+
 async function connectToWhatsApp(): Promise<void> {
   if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
-    logger.error("Trop de tentatives de reconnexion. Arrêt.");
+    logger.error("Trop de tentatives. Arrêt.");
     process.exit(1);
   }
 
-  // Import dynamique de Baileys (évite les souciBaileys CJS/ESM)
   const baileys: any = await import("@whiskeysockets/baileys");
   const makeWASocket = baileys.makeWASocket || baileys.default;
-  const useMultiFileAuthState = baileys.useMultiFileAuthState || baileys.default?.useMultiFileAuthState;
+  const useMultiFileAuthState =
+    baileys.useMultiFileAuthState || baileys.default?.useMultiFileAuthState;
   const DisconnectReason = baileys.DisconnectReason;
 
   const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
-
-  // Version stable (bundled avec Baileys) — éviter les dernières versions
-  // qui causent des timeout sur les queries et bloquent la réception
-  const version: [number, number, number] = [2, 2403, 2];
-  logger.info({ version }, "Initialisation du bot WhatsApp leRH...");
+  const { fetchLatestBaileysVersion } = baileys;
+  const { version, isLatest } = await fetchLatestBaileysVersion();
+  logger.info({ version, isLatest }, "Initialisation du bot WhatsApp...");
 
   sock = makeWASocket({
     version,
@@ -211,32 +292,11 @@ async function connectToWhatsApp(): Promise<void> {
     browser: ["leRH", "Chrome", "0.1.0"],
     markOnlineOnConnect: true,
     shouldIgnoreJid: () => false,
-    getMessage: async (key: any) => {
-      return messageStore.get(key.id);
-    },
+    getMessage: async (key: any) => messageStore.get(key.id),
   });
 
   sock.ev.on("creds.update", saveCreds);
   processedMessages.clear();
-
-  // Log tous les événements pour debug
-  sock.ev.on("messaging-history.set", (data: any) => {
-    logger.info({ chats: data?.chats?.length, messages: data?.messages?.length }, "messaging-history.set");
-  });
-  sock.ev.on("messages.update", (updates: any) => {
-    if (updates?.length) logger.info({ count: updates.length }, "messages.update");
-  });
-  sock.ev.on("message-receipt.update", (updates: any) => {
-    if (updates?.length) logger.debug({ count: updates.length }, "message-receipt.update");
-  });
-
-  // Surveiller les données brutes WebSocket pour debug
-  sock.ws?.on?.("message", (data: any) => {
-    const raw = Buffer.isBuffer(data) ? data : Buffer.from(data || "");
-    if (raw.length > 0) {
-      logger.info({ len: raw.length, hex: raw.slice(0, 4).toString("hex") }, "WS raw message");
-    }
-  });
 
   sock.ev.on("connection.update", (update: any) => {
     const { connection, lastDisconnect, qr, isNewLogin } = update;
@@ -250,14 +310,13 @@ async function connectToWhatsApp(): Promise<void> {
     if (connection === "open") {
       logger.info({ isNewLogin }, "✅ WhatsApp connecté");
       connectionOpenTime = Date.now();
-      try {
-        sock.sendPresenceUpdate("available");
-      } catch {
-        /* ignore */
-      }
-      // Démarrer le poller de messages en attente
+      reconnectAttempts = 0;
+      try { sock.sendPresenceUpdate("available"); } catch { /* ignore */ }
       pollPendingMessages().catch((err) => logger.error({ err }, "Initial poll failed"));
-      setInterval(() => pollPendingMessages().catch((err) => logger.error({ err }, "Poll error")), 10_000);
+      setInterval(
+        () => pollPendingMessages().catch((err) => logger.error({ err }, "Poll error")),
+        10_000
+      );
     }
 
     if (connection === "close") {
@@ -266,36 +325,21 @@ async function connectToWhatsApp(): Promise<void> {
       const loggedOut = code === DisconnectReason?.loggedOut;
       const isConflict = err?.data?.type === "replaced";
 
-      // Réinitialiser le compteur SEULEMENT si la connexion a été stable
-      if (Date.now() - connectionOpenTime > MIN_STABLE_CONNECTION_MS) {
-        reconnectAttempts = 0;
-      }
-
-      if (isConflict) {
-        logger.error("Conflit de session détecté (une autre instance utilise le même compte WhatsApp).");
-        logger.error("Supprimez le dossier session/ et relancez pour rescanner le QR code.");
-      } else if (loggedOut) {
-        logger.error("Session expirée. Supprimez le dossier session/ et relancez.");
-      }
-
       if (loggedOut || isConflict) {
-        logger.error("Arrêt du bot — session invalide.");
-        if (sock) {
-          sock.end(undefined);
-        }
+        logger.error("Session invalide — supprimez session/ et relancez.");
+        if (sock) sock.end(undefined);
         process.exit(1);
       }
 
-      logger.warn({ code, loggedOut }, "❌ WhatsApp déconnecté");
-
+      logger.warn({ code }, "❌ Déconnecté");
       reconnectAttempts++;
+
       if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
-        logger.error("Trop de tentatives de reconnexion. Arrêt.");
         process.exit(1);
       }
 
       const delay = Math.min(5000 * reconnectAttempts, 30000);
-      logger.info(`Reconnexion dans ${delay / 1000}s (tentative ${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS})`);
+      logger.info(`Reconnexion dans ${delay / 1000}s...`);
       setTimeout(connectToWhatsApp, delay);
     }
   });
@@ -304,137 +348,109 @@ async function connectToWhatsApp(): Promise<void> {
     try {
       const { messages, type } = event;
       logger.info({ type, count: messages.length }, "messages.upsert");
-
-      // Log le premier message pour debug
-      if (messages?.[0]) {
-        const m = messages[0];
-        logger.info({
-          fromMe: m.key?.fromMe,
-          jid: m.key?.remoteJid,
-          hasMsg: !!m.message,
-          type: m.message?.conversation?.slice(0, 30),
-          msgId: m.key?.id,
-        }, "message detail");
-      }
-
       if (type !== "notify") return;
-
       for (const msg of messages) {
         await handleMessage(msg);
       }
     } catch (err) {
-      logger.error({ err }, "FATAL: messages.upsert handler crashed");
+      logger.error({ err }, "messages.upsert handler crashed");
     }
   });
 
-  // Vérification périodique de la connexion
   setInterval(() => {
-    const wsState = sock?.ws?.readyState;
-    logger.info({ wsState, reconnectAttempts }, "Heartbeat — connection state");
+    logger.debug({ wsState: sock?.ws?.readyState, reconnectAttempts }, "Heartbeat");
   }, 30_000);
 }
 
+// =============================================================================
+// POLLING DES MESSAGES EN ATTENTE
+// =============================================================================
+
 interface PendingMessage {
-  id: number;
+  id: string;
   message_type: string;
-  text: string;
+  text: string | null;
   document_path: string | null;
   platform_chat_id?: string;
 }
 
 async function pollPendingMessages(): Promise<void> {
   if (!sock) return;
+
+  const pendingUrl = `${BASE_URL}/api/whatsapp/pending`;
+
   try {
-    const res = await fetch(`${process.env.LERH_API_URL || "http://localhost:8000"}/api/whatsapp/pending`);
+    const res = await fetch(pendingUrl);
     if (!res.ok) {
       logger.warn({ status: res.status }, "Failed to fetch pending messages");
       return;
     }
+
     const messages: PendingMessage[] = await res.json();
     if (messages.length === 0) return;
 
-    logger.info({ count: messages.length }, "Fetching pending messages");
-
-    const API_URL = (process.env.LERH_API_URL || "http://localhost:8000").replace("/api", "");
+    logger.info({ count: messages.length }, "Processing pending messages");
 
     for (const msg of messages) {
-      // Convert phone number to proper WhatsApp JID format
-      let jid = msg.platform_chat_id || msg.id.toString();
-      if (jid && !jid.includes("@")) {
+      let jid = msg.platform_chat_id || String(msg.id);
+      if (!jid.includes("@")) {
         jid = `${jid}@s.whatsapp.net`;
       }
 
       try {
         if (msg.message_type === "document" && msg.document_path) {
-          const downloadUrl = `${API_URL}/documents/download/${msg.document_path}`;
+          // document_path = "user_id/filename.docx"
+          // Endpoint FastAPI : GET /documents/download/{filepath:path}
+          const documentUrl = encodeURI(`${BASE_URL}/documents/download/${msg.document_path}`);
           const filename = msg.document_path.split("/").pop() || "document.docx";
+          const caption = msg.text || "Votre document est prêt ! 📎";
 
-          const fileRes = await fetch(downloadUrl);
-          if (!fileRes.ok) {
-            logger.error({ status: fileRes.status, url: downloadUrl }, "Failed to download document");
-            continue;
-          }
-          const arrayBuffer = await fileRes.arrayBuffer();
-          const buffer = Buffer.from(arrayBuffer);
-
-          await sock.sendMessage(jid, {
-            document: buffer,
-            mimetype: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-            fileName: filename,
-            caption: msg.text,
-          });
-          logger.info({ id: msg.id, file: filename }, "Document sent via WhatsApp");
-        } else {
+          await sendDocumentMessage(jid, documentUrl, filename, caption);
+        } else if (msg.text) {
           await sock.sendMessage(jid, { text: msg.text + "\u200B" });
-          logger.info({ id: msg.id }, "Text message sent via WhatsApp");
+          logger.info({ id: msg.id }, "Text message sent");
         }
       } catch (err) {
-        logger.error({ err, msgId: msg.id }, "Failed to send pending message");
+        logger.error({ err, msgId: msg.id, jid }, "Failed to send pending message");
+
+        // Prévenir l'utilisateur de l'echec
+        try {
+          const fallbackText =
+            "📎 Votre document a été généré mais l'envoi a échoué.\n" +
+            "Tapez 'mon cv' ou 'ma lettre' pour relancer l'envoi.\u200B";
+          await sock.sendMessage(jid, { text: fallbackText });
+        } catch { /* ignore */ }
       }
     }
   } catch (err) {
-    logger.error({ err }, "Error polling pending messages");
+    logger.error({ err }, "Error in pollPendingMessages");
   }
 }
 
-// Vérification que l'API est accessible
+// =============================================================================
+
 async function checkApiHealth() {
   try {
-    const res = await fetch(`${process.env.LERH_API_URL || "http://localhost:8000"}/health`);
+    const res = await fetch(`${BASE_URL}/health`);
     const data = await res.json();
-    logger.info({ data }, "API health check");
+    logger.info({ data }, "API health OK");
   } catch (err) {
     logger.warn({ err }, "API not reachable on startup");
   }
 }
+
 checkApiHealth();
 
-// Arrêt propre
-// Capturer les rejets de promesse silencieux (async event handlers)
 process.on("unhandledRejection", (reason) => {
-  logger.error({ err: reason }, "UNHANDLED PROMISE REJECTION");
+  logger.error({ err: reason }, "UNHANDLED REJECTION");
 });
 process.on("uncaughtException", (err) => {
   logger.error({ err }, "UNCAUGHT EXCEPTION");
 });
-
-process.on("SIGINT", async () => {
-  logger.info("Arrêt du bot WhatsApp...");
-  if (sock) {
-    sock.end(undefined);
-  }
-  process.exit(0);
-});
-
-process.on("SIGTERM", async () => {
-  logger.info("SIGTERM reçu, arrêt...");
-  if (sock) {
-    sock.end(undefined);
-  }
-  process.exit(0);
-});
+process.on("SIGINT", () => { if (sock) sock.end(undefined); process.exit(0); });
+process.on("SIGTERM", () => { if (sock) sock.end(undefined); process.exit(0); });
 
 connectToWhatsApp().catch((err) => {
-  logger.fatal({ err }, "Erreur fatale du bot WhatsApp");
+  logger.fatal({ err }, "Erreur fatale");
   process.exit(1);
 });
