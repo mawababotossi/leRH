@@ -212,19 +212,34 @@ async def generate_all(
         ) from exc
 
 
+MIME_TYPES = {
+    ".pdf": "application/pdf",
+    ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    ".zip": "application/zip",
+}
+
+
 @router.get("/download/{filepath:path}")
 async def download_file(filepath: str):
-    logger.info(f"Download request: raw={filepath}")
+    logger.info("Download request: raw=%s", filepath)
     decoded_path = unquote(filepath)
-    logger.info(f"Download request: decoded={decoded_path}")
     file_path = GENERATED_DIR / decoded_path
     if not file_path.resolve().is_relative_to(GENERATED_DIR.resolve()):
         raise HTTPException(status_code=403, detail="Accès refusé")
-    logger.info(f"Download request: full_path={file_path} exists={file_path.exists()}")
+    logger.info("Download request: full_path=%s exists=%s", file_path, file_path.exists())
     if not file_path.exists():
         raise HTTPException(status_code=404, detail="Fichier non trouvé")
+    file_size = file_path.stat().st_size
+    logger.info("Download serving: %s (%d bytes)", file_path.name, file_size)
+    if file_size == 0:
+        logger.error("File is empty (0 bytes): %s", file_path)
+        raise HTTPException(status_code=500, detail="Le fichier généré est vide")
+    media_type = MIME_TYPES.get(file_path.suffix.lower(), "application/octet-stream")
     return StreamingResponse(
         file_path.open("rb"),
-        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        headers={"Content-Disposition": f"attachment; filename={file_path.name}"},
+        media_type=media_type,
+        headers={
+            "Content-Disposition": f'attachment; filename="{file_path.name}"',
+            "Content-Length": str(file_size),
+        },
     )

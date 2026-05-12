@@ -75,17 +75,29 @@ class Assistant:
         )
 
     def _system_message(self) -> dict:
+        """Construit un unique message system consolidant le prompt de base,
+        le profil utilisateur et toutes les instructions comportementales.
+
+        Les LLM exigent que le(s) message(s) system soient strictement en
+        premiere position. On fusionne tout ici pour n'en envoyer qu'un seul.
+        """
         parts = [SYSTEM_PROMPT]
+
+        # --- Instructions comportementales ---
+        for instruction in self.instructions:
+            parts.append(instruction)
+
+        # --- Profil utilisateur ---
         profile = (
             f"L'utilisateur s'appelle {self.name}. "
             f"Il habite {self.country} et travaille comme {self.activity}."
         )
         if self.skills:
-            profile += f" Compétences : {', '.join(self.skills)}."
+            profile += f" Comp\u00e9tences\u00a0: {', '.join(self.skills)}."
         if self.diploma:
-            profile += f" Diplôme : {self.diploma}."
+            profile += f" Dipl\u00f4me\u00a0: {self.diploma}."
         if self.experience:
-            profile += f" Expérience : {self.experience}."
+            profile += f" Exp\u00e9rience\u00a0: {self.experience}."
         if self.languages:
             lang_str = ", ".join(
                 f"{lang.get('language', lang)} ({lang.get('level', 'unknown')})"
@@ -93,17 +105,22 @@ class Assistant:
                 else str(lang)
                 for lang in self.languages
             )
-            profile += f" Langues : {lang_str}."
+            profile += f" Langues\u00a0: {lang_str}."
         if self.credits is not None:
-            profile += f" Crédits disponibles : {self.credits}."
+            profile += f" Cr\u00e9dits disponibles\u00a0: {self.credits}."
         parts.append(profile)
-        return {"role": "system", "content": " ".join(parts)}
+
+        return {"role": "system", "content": "\n\n".join(parts)}
 
     def _build_messages(self, user_input: str, history: list[dict] | None = None) -> list[dict]:
-        messages = [self._system_message()]
+        """Construit la liste de messages pour l'appel LLM.
 
-        for instruction in self.instructions:
-            messages.append({"role": "system", "content": instruction})
+        Structure garantie :
+          [system]  <-- toujours en position 0, jamais suivi d'un autre system
+          [history messages (user/assistant/tool)...]
+          [user: user_input]
+        """
+        messages: list[dict] = [self._system_message()]
         if history:
             messages.extend(history)
         messages.append({"role": "user", "content": user_input})
@@ -772,11 +789,53 @@ class Assistant:
                 return response.choices[0].message.content or ""
 
             finish_reason = response.choices[0].finish_reason
-            if finish_reason != "tool_calls":
-                return response.choices[0].message.content or ""
-
             assistant_msg = response.choices[0].message
-            messages.append(assistant_msg)
+            logger.info("RAW LLM MESSAGE: %s (finish_reason=%s)", assistant_msg, finish_reason)
+            has_tool_calls = bool(assistant_msg.tool_calls)
+
+            # Extraction du contenu texte, en gérant le cas des modèles locaux
+            # (Jan/Qwen) qui placent parfois le texte dans 'reasoning_content'
+            msg_content = assistant_msg.content
+            if not msg_content:
+                reasoning = getattr(assistant_msg, "reasoning_content", None)
+                if (
+                    not reasoning
+                    and hasattr(assistant_msg, "model_extra")
+                    and assistant_msg.model_extra
+                ):
+                    reasoning = assistant_msg.model_extra.get("reasoning_content")
+                if reasoning:
+                    msg_content = reasoning
+
+            if not has_tool_calls:
+                if not msg_content:
+                    logger.warning(
+                        "LLM returned empty content (finish_reason=%s, turn=%d)",
+                        finish_reason,
+                        _turn,
+                    )
+                    msg_content = "Désolé, je n'ai pas pu formuler une réponse. Veuillez réessayer."
+                return msg_content
+            # Serialisation explicite en dict pour eviter tout artefact
+            # de conversion qui pourrait reinjecter un system message
+            # en milieu de conversation sur certains LLM.
+            tool_calls_payload = [
+                {
+                    "id": tc.id,
+                    "type": "function",
+                    "function": {
+                        "name": tc.function.name,
+                        "arguments": tc.function.arguments,
+                    },
+                }
+                for tc in (assistant_msg.tool_calls or [])
+            ]
+            assistant_dict: dict = {"role": "assistant", "tool_calls": tool_calls_payload}
+            # Ne pas inclure 'content' quand il est None/vide :
+            # certains LLM rejettent content="" en presence de tool_calls.
+            if msg_content:
+                assistant_dict["content"] = msg_content
+            messages.append(assistant_dict)
 
             for tool_call in assistant_msg.tool_calls:
                 result = await self._handle_tool_call(tool_call)
@@ -788,4 +847,11 @@ class Assistant:
                     }
                 )
 
-        return response.choices[0].message.content or ""
+        # MAX_TOOL_TURNS atteint : on retourne le dernier contenu disponible.
+        final_content = response.choices[0].message.content if response else None
+        if not final_content:
+            logger.warning(
+                "_call_with_tools: LLM returned empty content after %d turns", MAX_TOOL_TURNS
+            )
+            final_content = "Désolé, je n'ai pas pu générer une réponse. Veuillez réessayer."
+        return final_content

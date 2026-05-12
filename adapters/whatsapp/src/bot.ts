@@ -27,6 +27,9 @@ const MIN_STABLE_CONNECTION_MS = 10_000;
 
 // Nettoyage periodique pour eviter la fuite memoire
 const MAX_PROCESSED_IDS = 2000;
+// Délai minimum après connexion avant d'envoyer des médias.
+// Les init queries et la synchronisation multi-device prennent du temps.
+const STABLE_DELAY_MS = 15_000;
 function pruneProcessedMessages() {
   if (processedMessages.size > MAX_PROCESSED_IDS) {
     const toDelete = [...processedMessages].slice(0, processedMessages.size - MAX_PROCESSED_IDS);
@@ -221,45 +224,54 @@ async function sendDocumentMessage(
   const cleanFilename = filename.replace(/[^a-zA-Z0-9_\.]/g, "_");
   const mimetype = getMimetype(cleanFilename);
 
-  logger.info({ jid, documentUrl, filename: cleanFilename, mimetype }, "Sending document via Buffer method");
+  // Vérifier que la connexion est stable avant d'envoyer un média.
+  // Un envoi sur connexion instable → phash ack → PDF indéchiffrable côté téléphone.
+  const wsState = sock?.ws?.readyState;
+  const elapsed = Date.now() - connectionOpenTime;
+  if (wsState !== 1 /* WebSocket.OPEN */) {
+    throw new Error(`WebSocket not open (state=${wsState}) — skip media send`);
+  }
+  if (elapsed < STABLE_DELAY_MS) {
+    throw new Error(
+      `Connexion trop récente (${elapsed}ms < ${STABLE_DELAY_MS}ms) — skip media send`
+    );
+  }
+
+  // Convertir localhost en IP accessible
+  const accessibleUrl = documentUrl
+    .replace("localhost", process.env.HOST_IP || "192.168.1.70")
+    .replace("127.0.0.1", process.env.HOST_IP || "192.168.1.70");
+
+  const finalCaption = caption
+    ? `${caption}\n\nLien de secours : ${accessibleUrl}`
+    : `Lien de secours : ${accessibleUrl}`;
+
+  logger.info({ jid, documentUrl: accessibleUrl, filename: cleanFilename, mimetype }, "Sending document via URL method");
 
   try {
-    const fileRes = await fetch(documentUrl);
-    if (!fileRes.ok) {
-      throw new Error(
-        `Cannot download document: HTTP ${fileRes.status} from ${documentUrl}`
-      );
-    }
-
-    const arrayBuffer = await fileRes.arrayBuffer();
-    const buffer = Buffer.from(arrayBuffer);
-
-    const localLink = documentUrl.replace("localhost", "192.168.1.70");
-    const finalCaption = caption ? `${caption}\n\nLien de secours (si le fichier ne s'affiche pas) : ${localLink}` : `Lien de secours : ${localLink}`;
-
     const sentMsg = await sock.sendMessage(jid, {
-      document: buffer,
+      document: { url: accessibleUrl },
       mimetype,
       fileName: cleanFilename,
-      caption: caption,
+      caption: finalCaption,
     });
     if (sentMsg?.key?.id && sentMsg.message) {
       messageStore.set(sentMsg.key.id, sentMsg.message);
     }
 
-    logger.info({ filename, bytes: buffer.length }, "Document sent successfully");
-    
+    logger.info({ filename: cleanFilename }, "Document sent successfully via URL stream");
+
     // Fallback ABSOLU : Si WA drop le document + caption, ce message texte passera toujours
     await new Promise((r) => setTimeout(r, 600));
-    const fallbackMsg = await sock.sendMessage(jid, { 
-      text: `Lien de secours (si le document ne s'affiche pas ci-dessus) :\n${localLink}\n\u200B` 
+    const fallbackMsg = await sock.sendMessage(jid, {
+      text: `📎 Document prêt ! Si le fichier ne s'affiche pas, utilise ce lien :\n${accessibleUrl}\n\u200B`,
     });
     if (fallbackMsg?.key?.id && fallbackMsg.message) {
       messageStore.set(fallbackMsg.key.id, fallbackMsg.message);
     }
 
   } catch (err: any) {
-    logger.error({ err: err?.message, documentUrl }, "Failed to send document");
+    logger.error({ err: err?.message, documentUrl: accessibleUrl }, "Failed to send document");
     throw err;
   }
 }
@@ -288,11 +300,14 @@ async function connectToWhatsApp(): Promise<void> {
     auth: state,
     printQRInTerminal: true,
     syncFullHistory: false,
-    fireInitQueries: true,
+    // Désactivé : fireInitQueries cause des timeouts qui empêchent la distribution
+    // des clés média (getUSyncDevices), rendant les PDF indéchiffrables côté téléphone.
+    fireInitQueries: false,
     browser: ["leRH", "Chrome", "0.1.0"],
     markOnlineOnConnect: true,
     shouldIgnoreJid: () => false,
     getMessage: async (key: any) => messageStore.get(key.id),
+    defaultQueryTimeoutMs: 30_000,
   });
 
   sock.ev.on("creds.update", saveCreds);
@@ -312,11 +327,18 @@ async function connectToWhatsApp(): Promise<void> {
       connectionOpenTime = Date.now();
       reconnectAttempts = 0;
       try { sock.sendPresenceUpdate("available"); } catch { /* ignore */ }
-      pollPendingMessages().catch((err) => logger.error({ err }, "Initial poll failed"));
-      setInterval(
-        () => pollPendingMessages().catch((err) => logger.error({ err }, "Poll error")),
-        10_000
-      );
+      // Attendre STABLE_DELAY_MS avant le premier poll pour laisser la session
+      // multi-device se synchroniser (clés Signal, appareils liés, etc.).
+      // Sans ce délai, getUSyncDevices échoue et les médias sont indéchiffrables.
+      logger.info({ delayMs: STABLE_DELAY_MS }, "En attente de stabilisation de la connexion...");
+      setTimeout(() => {
+        logger.info("Connexion stable — démarrage du polling");
+        pollPendingMessages().catch((err) => logger.error({ err }, "Initial poll failed"));
+        setInterval(
+          () => pollPendingMessages().catch((err) => logger.error({ err }, "Poll error")),
+          10_000
+        );
+      }, STABLE_DELAY_MS);
     }
 
     if (connection === "close") {

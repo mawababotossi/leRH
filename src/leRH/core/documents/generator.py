@@ -282,6 +282,13 @@ class DocumentGenerator:
 
         for attempt in range(max_retries):
             try:
+                logger.info(
+                    "[LLM] Appel au modèle %s (tentative %d/%d, max_tokens=%d)...",
+                    settings.llm_model_id,
+                    attempt + 1,
+                    max_retries,
+                    max_tokens,
+                )
                 response = self._client.chat.completions.create(
                     model=settings.llm_model_id,
                     messages=[
@@ -291,7 +298,12 @@ class DocumentGenerator:
                     temperature=0.3,
                     max_tokens=max_tokens,
                 )
-                return response.choices[0].message.content or ""
+                content = response.choices[0].message.content or ""
+                logger.info(
+                    "[LLM] Réponse reçue (%d caractères).",
+                    len(content),
+                )
+                return content
             except RateLimitError:
                 if attempt < max_retries - 1:
                     delay = base_delay * (2**attempt)
@@ -312,16 +324,38 @@ class DocumentGenerator:
         return ""
 
     def _parse_json(self, content: str) -> dict | None:
+        """Tente de parser le JSON retourne par le LLM.
+
+        Gere les cas suivants :
+        - JSON pur
+        - JSON entoure de texte
+        - JSON dans un bloc markdown ```json ... ```
+        """
+        if not content or not content.strip():
+            return None
+
+        # Cas 1 : JSON pur
         try:
             return json.loads(content)
         except json.JSONDecodeError:
             pass
+
+        # Cas 2 : bloc markdown ```json ... ``` ou ``` ... ```
+        md_match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", content, re.DOTALL)
+        if md_match:
+            try:
+                return json.loads(md_match.group(1))
+            except json.JSONDecodeError:
+                pass
+
+        # Cas 3 : JSON embarque dans du texte
         match = re.search(r"\{.*\}", content, re.DOTALL)
         if match:
             try:
                 return json.loads(match.group())
             except json.JSONDecodeError:
                 pass
+
         return None
 
     def generate_cv_content(
@@ -334,18 +368,31 @@ class DocumentGenerator:
             job: Offre d'emploi cible.
             cv_analysis: Analyse du vrai CV uploadé (optionnel mais fortement recommandé).
         """
+        logger.info("[CV] Construction du profil candidat...")
         profile_text = self._build_profile_text(user, cv_analysis=cv_analysis)
         job_text = self._build_job_text(job)
         prompt = CV_GENERATION_PROMPT.format(profile=profile_text, job=job_text)
 
+        logger.info("[CV] Génération du contenu via LLM...")
         content = self._call_llm(
             prompt,
             "You generate ATS-optimized CVs in French. Return ONLY valid JSON.",
         )
+        logger.info("[CV] Parsing de la réponse JSON...")
         data = self._parse_json(content)
         if not data:
+            logger.error(
+                "[CV] Echec du parsing JSON. Contenu brut du LLM (500 premiers caractères) : %r",
+                content[:500] if content else "(vide)",
+            )
             raise DocumentGenerationError("Impossible de générer le contenu du CV.")
 
+        logger.info(
+            "[CV] Contenu structuré OK — %d expérience(s), %d formation(s), %d compétence(s).",
+            len(data.get("experience", [])),
+            len(data.get("education", [])),
+            len(data.get("core_competencies", [])),
+        )
         return GeneratedCV(
             summary=data.get("summary", ""),
             core_competencies=data.get("core_competencies", []),
@@ -370,6 +417,7 @@ class DocumentGenerator:
             match_analysis: Analyse de correspondance profil/poste (optionnel).
             cv_analysis: Analyse du vrai CV uploadé (optionnel mais fortement recommandé).
         """
+        logger.info("[Lettre] Construction du profil candidat...")
         profile_text = self._build_profile_text(user, cv_analysis=cv_analysis)
         job_text = self._build_job_text(job)
         prompt = COVER_LETTER_PROMPT.format(
@@ -378,14 +426,24 @@ class DocumentGenerator:
             match_analysis=match_analysis or "Non disponible",
         )
 
+        logger.info("[Lettre] Génération du contenu via LLM...")
         content = self._call_llm(
             prompt,
             "You write professional cover letters in French. Return ONLY valid JSON.",
         )
+        logger.info("[Lettre] Parsing de la réponse JSON...")
         data = self._parse_json(content)
         if not data:
+            logger.error(
+                "[Lettre] Echec du parsing JSON. Contenu brut du LLM (500 premiers caractères) : %r",
+                content[:500] if content else "(vide)",
+            )
             raise DocumentGenerationError("Impossible de générer la lettre de motivation.")
 
+        logger.info(
+            "[Lettre] Contenu structuré OK — %d paragraphe(s).",
+            len(data.get("body_paragraphs", [])),
+        )
         return GeneratedCoverLetter(
             recipient=data.get("recipient", "À l'attention du recruteur"),
             subject=data.get("subject", ""),
@@ -805,11 +863,12 @@ class DocumentGenerator:
                          sera fidèle au vrai parcours de l'utilisateur.
         """
         logger.info(
-            "Génération du CV pour %s (user_id=%s) - Poste: %s (job_id=%s)%s",
+            "[CV] Démarrage génération — user=%s (id=%s), poste='%s' (id=%s), format=%s%s",
             user.name,
             user.id,
             job.title,
             job.id,
+            fmt,
             " [avec analyse CV]" if cv_analysis else " [sans CV uploadé]",
         )
         cv = self.generate_cv_content(user, job, cv_analysis=cv_analysis)
@@ -818,10 +877,22 @@ class DocumentGenerator:
         filename = f"CV_{name_clean}_{job_clean}"[:80]
 
         if fmt == "pdf":
+            logger.info("[CV] Rendu PDF en cours...")
             buf = self.build_cv_pdf(cv, user, job)
+            logger.info(
+                "[CV] PDF généré avec succès — fichier: %s.pdf (%d octets)",
+                filename,
+                buf.getbuffer().nbytes,
+            )
             return buf, f"{filename}.pdf"
 
+        logger.info("[CV] Rendu DOCX en cours...")
         buf = self.build_cv_docx(cv, user, job)
+        logger.info(
+            "[CV] DOCX généré avec succès — fichier: %s.docx (%d octets)",
+            filename,
+            buf.getbuffer().nbytes,
+        )
         return buf, f"{filename}.docx"
 
     def generate_cover_letter(
@@ -842,11 +913,12 @@ class DocumentGenerator:
             cv_analysis: Analyse du vrai CV uploadé.
         """
         logger.info(
-            "Génération de la lettre pour %s (user_id=%s) - Poste: %s (job_id=%s)%s",
+            "[Lettre] Démarrage génération — user=%s (id=%s), poste='%s' (id=%s), format=%s%s",
             user.name,
             user.id,
             job.title,
             job.id,
+            fmt,
             " [avec analyse CV]" if cv_analysis else " [sans CV uploadé]",
         )
         letter = self.generate_cover_letter_content(
@@ -857,8 +929,20 @@ class DocumentGenerator:
         filename = f"Lettre_Motivation_{name_clean}_{job_clean}"[:80]
 
         if fmt == "pdf":
+            logger.info("[Lettre] Rendu PDF en cours...")
             buf = self.build_cover_letter_pdf(letter, user, job)
+            logger.info(
+                "[Lettre] PDF généré avec succès — fichier: %s.pdf (%d octets)",
+                filename,
+                buf.getbuffer().nbytes,
+            )
             return buf, f"{filename}.pdf"
 
+        logger.info("[Lettre] Rendu DOCX en cours...")
         buf = self.build_cover_letter_docx(letter, user, job)
+        logger.info(
+            "[Lettre] DOCX généré avec succès — fichier: %s.docx (%d octets)",
+            filename,
+            buf.getbuffer().nbytes,
+        )
         return buf, f"{filename}.docx"
