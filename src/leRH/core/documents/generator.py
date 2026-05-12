@@ -679,13 +679,30 @@ class DocumentGenerator:
         pbdr.append(bottom)
         ppr.append(pbdr)
 
+    @staticmethod
+    def _pdf_multi_cell(pdf: FPDF, h: float, txt: str) -> None:
+        """Safe multi_cell that always resets x to l_margin before rendering.
+
+        Root cause of the crash: fpdf2's multi_cell() leaves self.x at the right
+        edge of the last rendered fragment. The NEXT call with w=0 then computes
+        available_width = page_width - r_margin - current_x ≈ 0, which raises
+        "Not enough horizontal space to render a single character".
+
+        Fix: unconditionally reset x to l_margin before every multi_cell call.
+        """
+        clean = (txt or "").strip()
+        if not clean:
+            return
+        pdf.set_x(pdf.l_margin)
+        pdf.multi_cell(0, h, clean)
+
     def build_cv_pdf(self, cv: GeneratedCV, user: User, job: Job) -> BytesIO:
         pdf = FPDF()
         pdf.add_page()
 
-        margin = 20
+        margin = 15
         pdf.set_margins(margin, margin, margin)
-        pdf.set_auto_page_break(auto=True, margin=20)
+        pdf.set_auto_page_break(auto=True, margin=15)
 
         if FONT_PATH and BOLD_FONT_PATH:
             pdf.add_font("DejaVu", "", FONT_PATH, uni=True)
@@ -714,14 +731,14 @@ class DocumentGenerator:
 
         self._pdf_section(pdf, "Résumé Professionnel")
         pdf.set_font(PDF_FONT, "", 10)
-        pdf.multi_cell(0, 5.5, cv.summary)
+        self._pdf_multi_cell(pdf, 5.5, cv.summary)
         pdf.ln(2)
 
         if cv.core_competencies:
             self._pdf_section(pdf, "Compétences Clés")
             pdf.set_font(PDF_FONT, "", 10)
             comps = ", ".join(cv.core_competencies)
-            pdf.multi_cell(0, 5.5, comps)
+            self._pdf_multi_cell(pdf, 5.5, comps)
             pdf.ln(2)
 
         if cv.experience:
@@ -748,7 +765,7 @@ class DocumentGenerator:
 
                 pdf.set_font(PDF_FONT, "", 10)
                 for bullet in exp.get("bullets", []):
-                    pdf.multi_cell(0, 5, f"- {bullet}")
+                    self._pdf_multi_cell(pdf, 5, f"- {bullet}")
                 pdf.ln(2)
 
         if cv.education:
@@ -781,7 +798,7 @@ class DocumentGenerator:
             self._pdf_section(pdf, "Langues & Certifications")
             pdf.set_font(PDF_FONT, "", 10)
             for item in certs_and_langs:
-                pdf.multi_cell(0, 5.5, f"- {item}")
+                self._pdf_multi_cell(pdf, 5.5, f"- {item}")
             pdf.ln(2)
 
         buf = BytesIO()
@@ -793,9 +810,9 @@ class DocumentGenerator:
         pdf = FPDF()
         pdf.add_page()
 
-        margin = 25
+        margin = 15
         pdf.set_margins(margin, margin, margin)
-        pdf.set_auto_page_break(auto=True, margin=20)
+        pdf.set_auto_page_break(auto=True, margin=15)
 
         if FONT_PATH and BOLD_FONT_PATH:
             pdf.add_font("DejaVu", "", FONT_PATH, uni=True)
@@ -811,17 +828,17 @@ class DocumentGenerator:
         pdf.ln(8)
 
         pdf.set_font(PDF_FONT, "B", 12)
-        pdf.multi_cell(0, 6, letter.subject)
+        self._pdf_multi_cell(pdf, 6, letter.subject)
         pdf.ln(6)
 
         pdf.set_font(PDF_FONT, "", 11)
         for para_text in letter.body_paragraphs:
-            pdf.multi_cell(0, 6, para_text)
+            self._pdf_multi_cell(pdf, 6, para_text)
             pdf.ln(3)
 
         pdf.ln(4)
         pdf.set_font(PDF_FONT, "", 11)
-        pdf.multi_cell(0, 6, letter.closing)
+        self._pdf_multi_cell(pdf, 6, letter.closing)
         pdf.ln(8)
 
         pdf.set_font(PDF_FONT, "B", 11)

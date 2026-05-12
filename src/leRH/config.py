@@ -15,9 +15,9 @@ class Settings(BaseSettings):
 
     telegram_token: str = ""
     openai_api_key: str = ""
-    openai_base_url: str = "https://integrate.api.nvidia.com/v1"
+    openai_base_url: str = "http://127.0.0.1:1337/v1"
     openai_timeout: int = 120
-    llm_model_id: str = "nvidia/nemotron-4-340b-instruct"
+    llm_model_id: str = "mistralai/mistral-small-4-119b-2603"
     asr_model: str = "nvidia/nemostt-whisper"
     tts_model: str = "nvidia/parakeet-tts"
 

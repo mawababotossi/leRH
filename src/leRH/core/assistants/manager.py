@@ -625,6 +625,16 @@ class Assistant:
         logger.info(
             "Background task launched: %s for user=%s job=%s", doc_type, self.user_id, job.title
         )
+
+        def _log_task_exception(t: asyncio.Task) -> None:
+            if not t.cancelled() and t.done():
+                exc = t.exception()
+                if exc:
+                    logger.error(
+                        "[bg] Background task FAILED (%s, user=%s): %s",
+                        doc_type, self.user_id, exc, exc_info=exc,
+                    )
+
         task = asyncio.create_task(
             generate_document_background(
                 user_id=self.user_id,
@@ -635,7 +645,7 @@ class Assistant:
                 chat_id=self.chat_id or self.user_id,
             )
         )
-        task.add_done_callback(lambda t: t.exception() if not t.cancelled() and t.done() else None)
+        task.add_done_callback(_log_task_exception)
 
         return json.dumps(
             {

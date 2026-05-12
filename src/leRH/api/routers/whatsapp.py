@@ -386,10 +386,18 @@ class PendingMessageResponse(BaseModel):
     platform_chat_id: str | None = None
 
 
+class AckRequest(BaseModel):
+    ids: list[str]
+
+
 @router.get("/pending", response_model=list[PendingMessageResponse])
 async def get_pending_messages(
     db: AsyncSession = Depends(get_db),
 ) -> list[PendingMessageResponse]:
+    """Retourne les messages en attente SANS les marquer comme envoyés.
+
+    Le bot doit appeler POST /pending/ack avec les IDs une fois l'envoi confirmé.
+    """
     from sqlalchemy import select
 
     from leRH.db.models import PendingMessage
@@ -401,9 +409,6 @@ async def get_pending_messages(
         .limit(50)
     )
     msgs = result.scalars().all()
-    for msg in msgs:
-        msg.sent = True
-    await db.commit()
     return [
         PendingMessageResponse(
             id=msg.id,
@@ -414,3 +419,30 @@ async def get_pending_messages(
         )
         for msg in msgs
     ]
+
+
+@router.post("/pending/ack")
+async def ack_pending_messages(
+    payload: AckRequest,
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Marque les messages comme envoyés après confirmation du bot WhatsApp.
+
+    Le bot appelle cet endpoint avec la liste des IDs qu'il a réussi à envoyer.
+    """
+    from sqlalchemy import select
+
+    from leRH.db.models import PendingMessage
+
+    if not payload.ids:
+        return {"acked": 0}
+
+    result = await db.execute(
+        select(PendingMessage).where(PendingMessage.id.in_(payload.ids))
+    )
+    msgs = result.scalars().all()
+    for msg in msgs:
+        msg.sent = True
+    await db.commit()
+    logger.info("Acked %d pending messages: %s", len(msgs), payload.ids)
+    return {"acked": len(msgs)}

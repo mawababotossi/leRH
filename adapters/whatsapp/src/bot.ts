@@ -3,13 +3,16 @@
  */
 
 import { Boom } from "@hapi/boom";
-import { downloadContentFromMessage, jidNormalizedUser } from "@whiskeysockets/baileys";
+import { downloadContentFromMessage, jidNormalizedUser, makeCacheableSignalKeyStore } from "@whiskeysockets/baileys";
 import qrcode from "qrcode-terminal";
 import pino from "pino";
+import fs from "node:fs/promises";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { apiRequest } from "./api-client.js";
 
 const logger = pino({
-  level: "debug",
+  level: "info", // Changé de 'debug' à 'trace' pour voir tous les paquets Baileys
   transport: {
     target: "pino-pretty",
     options: { colorize: true, translateTime: "HH:MM:ss" },
@@ -23,7 +26,9 @@ const MAX_RECONNECT_ATTEMPTS = 15;
 const processedMessages = new Set<string>();
 const messageStore = new Map<string, any>();
 let connectionOpenTime = 0;
-const MIN_STABLE_CONNECTION_MS = 10_000;
+const MIN_STABLE_CONNECTION_MS = 15_000;
+// Cache pour mapper les ID bruts (ex: 2256...) vers leur JID complet (ex: ...@lid)
+const jidMap = new Map<string, string>();
 
 // Nettoyage periodique pour eviter la fuite memoire
 const MAX_PROCESSED_IDS = 2000;
@@ -48,6 +53,10 @@ function getBaseUrl(): string {
 
 const BASE_URL = getBaseUrl();
 logger.info({ BASE_URL }, "API base URL resolved");
+
+// Emplacement local des documents (copie de la logique Python)
+const DATA_DIR = path.resolve(process.cwd(), "..", "..", "data");
+const GENERATED_DIR = path.join(DATA_DIR, "generated");
 
 function getMessageText(msg: any): string {
   return (
@@ -170,110 +179,101 @@ async function handleMessage(msg: any): Promise<void> {
   }
 }
 
-// =============================================================================
-// ENVOI DE DOCUMENTS — explication de la syntaxe Baileys correcte
-// =============================================================================
-//
-// ERREURS COMMUNES avec Baileys pour les documents :
-//
-// ❌ MAUVAIS — caption dans le contenu (ignoré ou rejeté pour les documents) :
-//    sock.sendMessage(jid, { document: buf, fileName: "f.docx", caption: "..." })
-//
-// ❌ MAUVAIS — buffer brut sans vérification de taille :
-//    const buf = Buffer.from(await res.arrayBuffer())
-//    sock.sendMessage(jid, { document: buf, ... })
-//    → échoue silencieusement si buf est vide ou corrompu
-//
-// ✅ BON — URL directe, Baileys streame vers WA sans charger en mémoire :
-//    sock.sendMessage(jid, { document: { url: "http://..." }, fileName: "f.docx", mimetype: "..." })
-//
-// ✅ BON — caption en message texte séparé (toujours visible) :
-//    await sock.sendMessage(jid, { document: { url }, fileName, mimetype })
-//    await sock.sendMessage(jid, { text: "Votre CV est prêt !" })
-//
-// NOTE : l'URL passée à Baileys doit être accessible depuis le réseau
-//        du processus Node.js (pas depuis le navigateur de l'utilisateur).
-//        En Docker : utiliser le nom du service interne (ex: http://api:8000).
-// =============================================================================
+/**
+ * Charge un média depuis un chemin local ou une URL distante.
+ * (Logique inspirée d'OpenClaw)
+ */
+async function loadMedia(mediaPathOrUrl: string): Promise<{ buffer: Buffer; mimetype: string; fileName: string }> {
+  // 1. Essayer le chemin local direct (plus rapide et stable)
+  const localPath = path.join(GENERATED_DIR, mediaPathOrUrl);
+  try {
+    const stats = await fs.stat(localPath);
+    if (stats.isFile()) {
+      const buffer = await fs.readFile(localPath);
+      const fileName = path.basename(localPath);
+      const ext = path.extname(fileName).toLowerCase();
+      let mimetype = "application/octet-stream";
+      if (ext === ".pdf") mimetype = "application/pdf";
+      else if (ext === ".docx") mimetype = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+      else if (ext === ".jpg" || ext === ".jpeg") mimetype = "image/jpeg";
+      else if (ext === ".png") mimetype = "image/png";
+      
+      logger.info({ localPath, size: buffer.length }, "Media loaded from disk");
+      return { buffer, mimetype, fileName };
+    }
+  } catch {
+    // Si echec, on continue vers le fetch HTTP
+  }
 
-function getMimetype(filename: string): string {
-  if (filename.endsWith(".docx")) {
-    return "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+  // 2. Fallback HTTP (méthode OpenClaw outbound)
+  let url = mediaPathOrUrl;
+  if (!url.startsWith("http")) {
+    url = `${BASE_URL}/documents/download/${mediaPathOrUrl}`;
   }
-  if (filename.endsWith(".pdf")) {
-    return "application/pdf";
+
+  // Hack IP pour environnements Docker/locaux si necessaire
+  const hostIp = process.env.HOST_IP;
+  if (hostIp) {
+    url = url.replace("localhost", hostIp).replace("127.0.0.1", hostIp);
   }
-  return "application/octet-stream";
+
+  logger.info({ url }, "Fetching media from URL");
+  const response = await fetch(url);
+  if (!response.ok) {
+    throw new Error(`Failed to download media: ${response.status} ${response.statusText}`);
+  }
+
+  const mimetype = response.headers.get("content-type") || "application/octet-stream";
+  const arrayBuffer = await response.arrayBuffer();
+  const buffer = Buffer.from(arrayBuffer);
+  const fileName = url.split("/").pop()?.split("?")[0] || "file";
+
+  return { buffer, mimetype, fileName };
 }
 
 /**
- * Envoie un document via Baileys.
- *
- * Stratégie :
- * 1. Passer l'URL directement à Baileys (recommandé, plus fiable).
- *    Baileys streame le fichier depuis l'URL vers les serveurs WhatsApp.
- * 2. Si ça échoue, télécharger le buffer et réessayer.
- * 3. Envoyer la légende dans un message texte séparé (plus compatible).
+ * Envoie un média avec le type approprié (image, audio, document).
+ * (Exactement comme OpenClaw send-api.js)
  */
-async function sendDocumentMessage(
+async function sendMediaMessage(
   jid: string,
-  documentUrl: string,
-  filename: string,
-  caption: string
+  media: { buffer: Buffer; mimetype: string; fileName: string },
+  caption?: string
 ): Promise<void> {
-  const cleanFilename = filename.replace(/[^a-zA-Z0-9_\.]/g, "_");
-  const mimetype = getMimetype(cleanFilename);
+  const { buffer, mimetype, fileName } = media;
+  let payload: any;
 
-  // Vérifier que la connexion est stable avant d'envoyer un média.
-  // Un envoi sur connexion instable → phash ack → PDF indéchiffrable côté téléphone.
-  const wsState = sock?.ws?.readyState;
-  const elapsed = Date.now() - connectionOpenTime;
-  if (wsState !== 1 /* WebSocket.OPEN */) {
-    throw new Error(`WebSocket not open (state=${wsState}) — skip media send`);
-  }
-  if (elapsed < STABLE_DELAY_MS) {
-    throw new Error(
-      `Connexion trop récente (${elapsed}ms < ${STABLE_DELAY_MS}ms) — skip media send`
-    );
-  }
-
-  // Convertir localhost en IP accessible
-  const accessibleUrl = documentUrl
-    .replace("localhost", process.env.HOST_IP || "192.168.1.70")
-    .replace("127.0.0.1", process.env.HOST_IP || "192.168.1.70");
-
-  const finalCaption = caption
-    ? `${caption}\n\nLien de secours : ${accessibleUrl}`
-    : `Lien de secours : ${accessibleUrl}`;
-
-  logger.info({ jid, documentUrl: accessibleUrl, filename: cleanFilename, mimetype }, "Sending document via URL method");
-
-  try {
-    const sentMsg = await sock.sendMessage(jid, {
-      document: { url: accessibleUrl },
+  if (mimetype.startsWith("image/")) {
+    payload = { image: buffer, caption: caption || undefined, mimetype };
+  } else if (mimetype.startsWith("audio/")) {
+    // WhatsApp attend opus pour les voice notes (PTT)
+    const audioMime = mimetype === "audio/ogg" ? "audio/ogg; codecs=opus" : mimetype;
+    payload = { audio: buffer, ptt: true, mimetype: audioMime };
+  } else if (mimetype.startsWith("video/")) {
+    payload = { video: buffer, caption: caption || undefined, mimetype };
+  } else {
+    // Document (PDF, DOCX, etc.)
+    payload = {
+      document: buffer,
       mimetype,
-      fileName: cleanFilename,
-      caption: finalCaption,
-    });
-    if (sentMsg?.key?.id && sentMsg.message) {
-      messageStore.set(sentMsg.key.id, sentMsg.message);
-    }
-
-    logger.info({ filename: cleanFilename }, "Document sent successfully via URL stream");
-
-    // Fallback ABSOLU : Si WA drop le document + caption, ce message texte passera toujours
-    await new Promise((r) => setTimeout(r, 600));
-    const fallbackMsg = await sock.sendMessage(jid, {
-      text: `📎 Document prêt ! Si le fichier ne s'affiche pas, utilise ce lien :\n${accessibleUrl}\n\u200B`,
-    });
-    if (fallbackMsg?.key?.id && fallbackMsg.message) {
-      messageStore.set(fallbackMsg.key.id, fallbackMsg.message);
-    }
-
-  } catch (err: any) {
-    logger.error({ err: err?.message, documentUrl: accessibleUrl }, "Failed to send document");
-    throw err;
+      fileName: fileName,
+      caption: caption || undefined,
+    };
   }
+
+  // Présence "en train d'écrire"
+  await sock.sendPresenceUpdate("composing", jid);
+  
+  // Stabilité : petit délai si connexion trop fraîche
+  const timeSinceConnect = Date.now() - connectionOpenTime;
+  if (connectionOpenTime > 0 && timeSinceConnect < MIN_STABLE_CONNECTION_MS) {
+    await new Promise(r => setTimeout(r, 2000));
+  }
+
+  const result = await sock.sendMessage(jid, payload);
+  if (!result) throw new Error("Baileys failed to send media");
+
+  logger.info({ jid, type: Object.keys(payload)[0], fileName }, "Media sent successfully");
 }
 
 // =============================================================================
@@ -297,17 +297,23 @@ async function connectToWhatsApp(): Promise<void> {
 
   sock = makeWASocket({
     version,
-    auth: state,
+    auth: {
+      creds: state.creds,
+      keys: makeCacheableSignalKeyStore(state.keys, logger),
+    },
+    logger, // On passe explicitement le logger à Baileys
     printQRInTerminal: true,
     syncFullHistory: false,
-    // Désactivé : fireInitQueries cause des timeouts qui empêchent la distribution
-    // des clés média (getUSyncDevices), rendant les PDF indéchiffrables côté téléphone.
-    fireInitQueries: false,
-    browser: ["leRH", "Chrome", "0.1.0"],
-    markOnlineOnConnect: true,
+    // fireInitQueries est nécessaire pour la distribution des clés média (getUSyncDevices).
+    // Si désactivé, les médias peuvent être indéchiffrables (erreur phash).
+    fireInitQueries: true,
+    browser: ["leRH", "Chrome", "110.0.0.0"],
+    markOnlineOnConnect: false, // Match OpenClaw
     shouldIgnoreJid: () => false,
-    getMessage: async (key: any) => messageStore.get(key.id),
-    defaultQueryTimeoutMs: 30_000,
+    getMessage: async (key: any) => {
+      return messageStore.get(key.id);
+    },
+    defaultQueryTimeoutMs: 120_000, // Augmenté à 2min pour garantir la sync des clés média
   });
 
   sock.ev.on("creds.update", saveCreds);
@@ -369,6 +375,19 @@ async function connectToWhatsApp(): Promise<void> {
   sock.ev.on("messages.upsert", async (event: any) => {
     try {
       const { messages, type } = event;
+
+      // Stockage systématique pour permettre les retries (erreurs phash)
+      for (const m of messages) {
+        if (m.key?.id && m.message) {
+          messageStore.set(m.key.id, m.message);
+        }
+        // Mémoriser le JID complet pour cet utilisateur
+        if (m.key?.remoteJid) {
+          const rawId = m.key.remoteJid.split("@")[0].split(":")[0];
+          jidMap.set(rawId, m.key.remoteJid);
+        }
+      }
+
       logger.info({ type, count: messages.length }, "messages.upsert");
       if (type !== "notify") return;
       for (const msg of messages) {
@@ -399,6 +418,13 @@ interface PendingMessage {
 async function pollPendingMessages(): Promise<void> {
   if (!sock) return;
 
+  // Attendre si la connexion n'est pas encore stable
+  const timeSinceConnect = Date.now() - connectionOpenTime;
+  if (connectionOpenTime > 0 && timeSinceConnect < MIN_STABLE_CONNECTION_MS) {
+    logger.info({ waitMs: MIN_STABLE_CONNECTION_MS - timeSinceConnect }, "Connection not stable yet, skipping poll");
+    return;
+  }
+
   const pendingUrl = `${BASE_URL}/api/whatsapp/pending`;
 
   try {
@@ -414,23 +440,42 @@ async function pollPendingMessages(): Promise<void> {
     logger.info({ count: messages.length }, "Processing pending messages");
 
     for (const msg of messages) {
-      let jid = msg.platform_chat_id || String(msg.id);
-      if (!jid.includes("@")) {
-        jid = `${jid}@s.whatsapp.net`;
+      const rawId = msg.platform_chat_id || String(msg.id);
+      let jid = rawId;
+
+      // Utiliser le JID complet mappé (LID ou PN) si on l'a déjà vu
+      if (jidMap.has(rawId)) {
+        jid = jidMap.get(rawId)!;
+        logger.debug({ rawId, jid }, "Using mapped JID from cache");
+      } else if (!jid.includes("@")) {
+        // Fallback: si l'ID est très long, c'est probablement un LID
+        const suffix = jid.length >= 14 ? "@lid" : "@s.whatsapp.net";
+        jid = `${jid}${suffix}`;
+        logger.debug({ rawId, jid }, "Guessed JID suffix");
       }
 
       try {
         if (msg.message_type === "document" && msg.document_path) {
-          // document_path = "user_id/filename.docx"
-          // Endpoint FastAPI : GET /documents/download/{filepath:path}
-          const documentUrl = encodeURI(`${BASE_URL}/documents/download/${msg.document_path}`);
-          const filename = msg.document_path.split("/").pop() || "document.docx";
+          // Charger le média (priorité local comme OpenClaw)
+          const media = await loadMedia(msg.document_path);
           const caption = msg.text || "Votre document est prêt ! 📎";
 
-          await sendDocumentMessage(jid, documentUrl, filename, caption);
+          await sendMediaMessage(jid, media, caption);
+          // ACK après envoi réussi — le message ne sera plus retourné par /pending
+          await fetch(`${BASE_URL}/api/whatsapp/pending/ack`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ ids: [msg.id] }),
+          }).catch((e) => logger.warn({ e }, "ACK request failed (non-fatal)"));
         } else if (msg.text) {
           await sock.sendMessage(jid, { text: msg.text + "\u200B" });
           logger.info({ id: msg.id }, "Text message sent");
+          // ACK après envoi réussi
+          await fetch(`${BASE_URL}/api/whatsapp/pending/ack`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ ids: [msg.id] }),
+          }).catch((e) => logger.warn({ e }, "ACK request failed (non-fatal)"));
         }
       } catch (err) {
         logger.error({ err, msgId: msg.id, jid }, "Failed to send pending message");
