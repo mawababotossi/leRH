@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from leRH.db.models import CV, Application, Job, Message, Subscription, User
 
@@ -11,14 +12,27 @@ class UserRepository:
         self.session = session
 
     async def get_by_id(self, user_id: str) -> User | None:
-        return await self.session.get(User, user_id)
+        result = await self.session.execute(
+            select(User)
+            .where(User.id == user_id)
+            .options(selectinload(User.experiences), selectinload(User.educations))
+        )
+        return result.scalar_one_or_none()
 
     async def get_by_telegram(self, telegram_id: int) -> User | None:
-        result = await self.session.execute(select(User).where(User.telegram_id == telegram_id))
+        result = await self.session.execute(
+            select(User)
+            .where(User.telegram_id == telegram_id)
+            .options(selectinload(User.experiences), selectinload(User.educations))
+        )
         return result.scalar_one_or_none()
 
     async def get_by_whatsapp(self, whatsapp_id: str) -> User | None:
-        result = await self.session.execute(select(User).where(User.whatsapp_id == whatsapp_id))
+        result = await self.session.execute(
+            select(User)
+            .where(User.whatsapp_id == whatsapp_id)
+            .options(selectinload(User.experiences), selectinload(User.educations))
+        )
         return result.scalar_one_or_none()
 
     async def get_all(self) -> list[User]:

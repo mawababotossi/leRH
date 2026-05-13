@@ -197,10 +197,18 @@ class DocumentGenerator:
         if diploma:
             parts.append(f"Diplôme: {diploma}")
 
-        # Expérience : le champ texte du CV analysé est plus riche que le résumé saisi
-        experience = cv_profile.get("experience") or user.experience
-        if experience:
-            parts.append(f"Expérience: {experience}")
+        # Expérience : préférer les tables structurées si disponibles, sinon le champ texte
+        if user.experiences:
+            exp_list = []
+            for exp in user.experiences:
+                exp_str = f"- {exp.title} chez {exp.company} ({exp.start_date} - {exp.end_date})"
+                if exp.description:
+                    exp_str += f": {exp.description}"
+                exp_list.append(exp_str)
+            parts.append("Expériences détaillées:\n" + "\n".join(exp_list))
+        elif cv_profile.get("experience") or user.experience:
+            experience = cv_profile.get("experience") or user.experience
+            parts.append(f"Expérience (résumé): {experience}")
 
         # Compétences : fusionner CV analysé + champs User (sans doublons)
         skills_from_cv: list[str] = []
@@ -228,10 +236,15 @@ class DocumentGenerator:
             if isinstance(certs, list) and certs:
                 parts.append(f"Certifications: {', '.join(certs)}")
 
-        # Formation détaillée depuis le CV
-        if cv_profile.get("education"):
+        # Formation détaillée
+        if user.educations:
+            edu_list = []
+            for edu in user.educations:
+                edu_list.append(f"- {edu.degree} en {edu.field or ''} à {edu.institution} ({edu.year or ''})")
+            parts.append("Formation détaillée:\n" + "\n".join(edu_list))
+        elif cv_profile.get("education"):
             edu = cv_profile["education"]
-            parts.append(f"Formation (détaillée): {json.dumps(edu, ensure_ascii=False)}")
+            parts.append(f"Formation (depuis CV): {json.dumps(edu, ensure_ascii=False)}")
 
         # Langues : préférer le CV analysé
         langs_from_cv: list = cv_profile.get("languages", [])
@@ -486,6 +499,11 @@ class DocumentGenerator:
             contact_parts.append(user.phone)
         if user.city:
             contact_parts.append(user.city)
+        if user.linkedin_url:
+            contact_parts.append(f"LinkedIn: {user.linkedin_url}")
+        if user.github_url:
+            contact_parts.append(f"GitHub: {user.github_url}")
+        
         contact_parts.append("Email: disponible sur demande")
         contact_para = doc.add_paragraph()
         contact_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
@@ -721,6 +739,11 @@ class DocumentGenerator:
             contact_parts.append(user.phone)
         if user.city:
             contact_parts.append(user.city)
+        if user.linkedin_url:
+            contact_parts.append(f"LinkedIn: {user.linkedin_url}")
+        if user.github_url:
+            contact_parts.append(f"GitHub: {user.github_url}")
+            
         contact_parts.append("Email: disponible sur demande")
 
         pdf.set_font(PDF_FONT, "", 9)

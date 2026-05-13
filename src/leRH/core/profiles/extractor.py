@@ -22,11 +22,14 @@ Respond with a VALID JSON object containing:
 2. "profile": object with:
    - skills: list of skill strings
    - diploma: highest degree (string or null)
-   - experience: brief professional experience summary (string)
-   - languages: list of {{"language": "...", "level": "..."}} (or empty list)
+   - experience_summary: brief professional experience summary (string)
+   - experiences: list of objects: {{"company": "...", "location": "...", "title": "...", "start_date": "...", "end_date": "...", "description": "..."}}
+   - education: list of objects: {{"institution": "...", "degree": "...", "field": "...", "year": "..."}}
+   - languages: list of {{"language": "...", "level": "..."}}
+   - social: {{"linkedin": "...", "github": "...", "website": "..."}}
 
 Example:
-{{"analysis": "Le candidat a 5 ans d'expérience en développement Python...", "profile": {{"skills": ["Python", "FastAPI", "SQL"], "diploma": "Master en Informatique", "experience": "5 ans en développement web", "languages": [{{"language": "Français", "level": "natif"}}]}}}}
+{{"analysis": "Le candidat a 5 ans d'expérience...", "profile": {{"skills": ["Python"], "diploma": "Master", "experiences": [{{"company": "Google", "title": "Dev"}}]}}}}
 
 Return ONLY the JSON object, no other text."""
 
@@ -50,16 +53,18 @@ class ProfileExtractor:
                     },
                     {
                         "role": "user",
-                        "content": UNIFIED_PROMPT.format(cv_text=cv_text[:8000]),
+                        "content": UNIFIED_PROMPT.format(cv_text=cv_text[:30000]),
                     },
                 ],
                 temperature=0.05,
-                max_tokens=1024,
+                max_tokens=4096,
             )
             content = response.choices[0].message.content or ""
             data = self._parse_json(content)
             if data and "analysis" in data:
                 return data
+            
+            logger.error("[Extractor] Failed to parse JSON or missing analysis key. Content snippet: %r", content[:500])
             return None
         except Exception:
             logger.exception("CV analysis failed")
@@ -76,11 +81,11 @@ class ProfileExtractor:
                     },
                     {
                         "role": "user",
-                        "content": EXTRACTION_PROMPT.format(cv_text=cv_text[:8000]),
+                        "content": EXTRACTION_PROMPT.format(cv_text=cv_text[:30000]),
                     },
                 ],
                 temperature=0.05,
-                max_tokens=1024,
+                max_tokens=4096,
             )
             content = response.choices[0].message.content or ""
             return self._parse_json(content)
@@ -104,14 +109,60 @@ class ProfileExtractor:
 
     @staticmethod
     def enrich_user(user: User, data: dict) -> User:
+        from leRH.db.models import Education, Experience
+
         if skills := data.get("skills"):
             user.skills = skills
         if diploma := data.get("diploma"):
             user.diploma = diploma
-        if experience := data.get("experience"):
-            user.experience = experience
+        if exp_summary := data.get("experience_summary") or data.get("experience"):
+            user.experience = exp_summary
+
+        # Social links
+        social = data.get("social", {})
+        if social.get("linkedin"):
+            user.linkedin_url = social["linkedin"]
+        if social.get("github"):
+            user.github_url = social["github"]
+        if social.get("website"):
+            user.website_url = social["website"]
+
         if languages := data.get("languages"):
             user.languages = languages
+
+        # Clear existing history before adding new (simplification for now)
+        # In a real app, we might want to merge or ask the user
+        user.experiences = []
+        user.educations = []
+
+        if experiences := data.get("experiences"):
+            for exp in experiences:
+                if not isinstance(exp, dict):
+                    continue
+                user.experiences.append(
+                    Experience(
+                        company=exp.get("company", "Inconnue"),
+                        location=exp.get("location"),
+                        title=exp.get("title", "Poste"),
+                        start_date=exp.get("start_date"),
+                        end_date=exp.get("end_date"),
+                        description=exp.get("description"),
+                    )
+                )
+
+        if educations := data.get("education"):
+            for edu in educations:
+                if not isinstance(edu, dict):
+                    continue
+                user.educations.append(
+                    Education(
+                        institution=edu.get("institution", "Inconnue"),
+                        degree=edu.get("degree", "Diplôme"),
+                        field=edu.get("field"),
+                        year=edu.get("year"),
+                    )
+                )
+
         return user
 
 
@@ -120,12 +171,31 @@ EXTRACTION_PROMPT = """Analyze this CV text and extract structured profile infor
 CV TEXT:
 {cv_text}
 
-Return ONLY a valid JSON object with these exact fields (no other text):
+Return ONLY a valid JSON object with these exact fields:
 {{
   "skills": ["skill1", "skill2", ...],
   "diploma": "highest degree obtained",
-  "experience": "brief summary of professional experience",
+  "experience_summary": "brief summary",
+  "experiences": [
+    {{
+      "company": "...",
+      "location": "...",
+      "title": "...",
+      "start_date": "...",
+      "end_date": "...",
+      "description": "..."
+    }}
+  ],
+  "education": [
+    {{
+      "institution": "...",
+      "degree": "...",
+      "field": "...",
+      "year": "..."
+    }}
+  ],
   "languages": [{{"language": "French", "level": "native"}}, ...],
+  "social": {{"linkedin": "...", "github": "...", "website": "..."}},
   "domain": "main professional domain",
   "years_experience": 5
 }}

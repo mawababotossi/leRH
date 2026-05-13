@@ -34,6 +34,12 @@ class User(Base):
     verified: Mapped[bool] = mapped_column(default=False)
     credits: Mapped[int] = mapped_column(default=10)
 
+    # Liens sociaux (Amélioration C)
+    linkedin_url: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    github_url: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    website_url: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    summary_override: Mapped[str | None] = mapped_column(Text, nullable=True)
+
     conversation_state: Mapped[str] = mapped_column(String(50), default="new")
 
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
@@ -42,6 +48,12 @@ class User(Base):
     )
 
     cvs: Mapped[list[CV]] = relationship(back_populates="user", cascade="all, delete-orphan")
+    experiences: Mapped[list[Experience]] = relationship(
+        back_populates="user", cascade="all, delete-orphan"
+    )
+    educations: Mapped[list[Education]] = relationship(
+        back_populates="user", cascade="all, delete-orphan"
+    )
     applications: Mapped[list[Application]] = relationship(
         back_populates="candidate", cascade="all, delete-orphan"
     )
@@ -59,9 +71,45 @@ class CV(Base):
     extracted_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     analysis: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
+    # Métadonnées CV (Amélioration B)
+    cv_type: Mapped[str] = mapped_column(String(20), server_default="original")  # original, tailored
+    job_id: Mapped[str | None] = mapped_column(ForeignKey("jobs.id"), nullable=True)
+    file_path: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    structured_content: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
     user: Mapped[User] = relationship(back_populates="cvs")
+
+
+class Experience(Base):
+    __tablename__ = "experiences"
+
+    id: Mapped[str] = mapped_column(String(12), primary_key=True, default=_uuid)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"))
+
+    company: Mapped[str] = mapped_column(String(255))
+    location: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    title: Mapped[str] = mapped_column(String(255))
+    start_date: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    end_date: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    user: Mapped[User] = relationship(back_populates="experiences")
+
+
+class Education(Base):
+    __tablename__ = "educations"
+
+    id: Mapped[str] = mapped_column(String(12), primary_key=True, default=_uuid)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"))
+
+    institution: Mapped[str] = mapped_column(String(255))
+    degree: Mapped[str] = mapped_column(String(255))
+    field: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    year: Mapped[str | None] = mapped_column(String(50), nullable=True)
+
+    user: Mapped[User] = relationship(back_populates="educations")
 
 
 class Job(Base):
