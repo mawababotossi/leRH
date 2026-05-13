@@ -626,12 +626,16 @@ class Assistant:
                         exc_info=exc,
                     )
 
-        # Déduire immédiatement, avant de lancer la tâche
-        deduct_result = await credit_mgr.deduct(
-            self.user_id, cost, reason=f"pre_{func_name}_{job.id}", session=self._db_session
-        )
-        if not deduct_result.success:
-            return json.dumps({"error": deduct_result.message})
+        # Déduire immédiatement dans une transaction indépendante, avant de lancer la tâche.
+        # On ne veut pas que cette déduction soit annulée si le handler principal rollback.
+        async with async_session_factory() as deduct_session:
+            deduct_result = await credit_mgr.deduct(
+                self.user_id, cost, reason=f"pre_{func_name}_{job.id}", session=deduct_session
+            )
+            if deduct_result.success:
+                await deduct_session.commit()
+            else:
+                return json.dumps({"error": deduct_result.message})
 
         # Seulement maintenant lancer la tâche (sans déduction dedans)
         task = asyncio.create_task(

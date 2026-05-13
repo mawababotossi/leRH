@@ -104,7 +104,7 @@ async def skip_activity(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
 async def skills(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     tg_user = update.message.from_user
     text = update.message.text or ""
-    skills_list = [s.strip()[:100] for s in text.split(",") if s.strip()]
+    skills_list = [s.strip()[:100] for s in text.split(",") if s.strip()][:20]
 
     async with async_session_factory() as session:
         repo = UserRepository(session)

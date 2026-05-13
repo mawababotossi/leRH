@@ -13,7 +13,6 @@ from leRH.core.assistants.manager import Assistant
 from leRH.core.conversation import ConversationMemory
 from leRH.db.base import get_db
 from leRH.db.repository import CVRepository, JobRepository, UserRepository
-from leRH.utils.rate_limiter import get_rate_limiter
 
 logger = logging.getLogger(__name__)
 
@@ -148,8 +147,9 @@ async def process_conversation(
     memory = ConversationMemory(db, user.id)
     state = user.conversation_state
 
-    ratelimit = get_rate_limiter()
-    if not ratelimit.check(whatsapp_id):
+    from leRH.utils.rate_limiter import check_rate_limit
+
+    if not await check_rate_limit(whatsapp_id):
         return "Vous envoyez trop de messages. Veuillez ralentir."
 
     try:
@@ -198,7 +198,7 @@ async def process_conversation(
             case "awaiting_skills":
                 # On parse les compétences séparées par des virgules
                 raw_skills = text.strip()
-                skills_list = [s.strip()[:100] for s in raw_skills.split(",") if s.strip()]
+                skills_list = [s.strip()[:100] for s in raw_skills.split(",") if s.strip()][:20]
                 user.skills = skills_list
                 user.conversation_state = "awaiting_diploma"
                 await db.flush()

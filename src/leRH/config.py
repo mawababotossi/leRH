@@ -27,6 +27,7 @@ class Settings(BaseSettings):
     activity: str = "job seeker"
 
     database_url: str = "sqlite+aiosqlite:///data/lerh.db"
+    allowed_origins: list[str] = ["http://localhost:3000", "http://localhost:5173"]
 
     search_enabled: bool = True
     search_max_results: int = 5

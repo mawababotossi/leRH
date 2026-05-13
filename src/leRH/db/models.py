@@ -72,7 +72,9 @@ class CV(Base):
     analysis: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
     # Métadonnées CV (Amélioration B)
-    cv_type: Mapped[str] = mapped_column(String(20), server_default="original")  # original, tailored
+    cv_type: Mapped[str] = mapped_column(
+        String(20), server_default="original"
+    )  # original, tailored
     job_id: Mapped[str | None] = mapped_column(ForeignKey("jobs.id"), nullable=True)
     file_path: Mapped[str | None] = mapped_column(String(500), nullable=True)
     structured_content: Mapped[dict | None] = mapped_column(JSON, nullable=True)
@@ -212,3 +214,10 @@ class PendingMessage(Base):
     sent: Mapped[bool] = mapped_column(Boolean, default=False)
 
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+class RateLimitEntry(Base):
+    __tablename__ = "rate_limits"
+
+    key: Mapped[str] = mapped_column(String(255), primary_key=True)
+    timestamp: Mapped[datetime] = mapped_column(DateTime, primary_key=True, default=func.now())

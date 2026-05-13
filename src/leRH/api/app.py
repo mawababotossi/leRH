@@ -9,6 +9,7 @@ from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from leRH.api.middleware.auth import verify_api_key
+from leRH.api.middleware.logging import CorrelationIdMiddleware, get_correlation_id
 from leRH.api.routers.applications import router as applications_router
 from leRH.api.routers.documents import router as documents_router
 from leRH.api.routers.health import router as health_router
@@ -18,8 +19,23 @@ from leRH.api.routers.profiles import router as profiles_router
 from leRH.api.routers.subscriptions import router as subscriptions_router
 from leRH.api.routers.users import router as user_router
 from leRH.api.routers.whatsapp import router as whatsapp_router
+from leRH.config import settings
 from leRH.db.base import Base, engine
 
+
+class CorrelationIdFormatter(logging.Formatter):
+    def format(self, record):
+        record.correlation_id = get_correlation_id() or "-"
+        return super().format(record)
+
+
+handler = logging.StreamHandler()
+handler.setFormatter(
+    CorrelationIdFormatter(
+        "%(asctime)s - %(name)s - %(levelname)s - [%(correlation_id)s] - %(message)s"
+    )
+)
+logging.basicConfig(level=logging.INFO, handlers=[handler])
 logger = logging.getLogger(__name__)
 
 DATA_DIR = Path(__file__).resolve().parent.parent.parent.parent / "data"
@@ -49,11 +65,12 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+app.add_middleware(CorrelationIdMiddleware)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://localhost:5173"],
+    allow_origins=settings.allowed_origins,
     allow_credentials=True,
-    allow_methods=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allow_headers=["*"],
 )
 

@@ -63,8 +63,11 @@ class ProfileExtractor:
             data = self._parse_json(content)
             if data and "analysis" in data:
                 return data
-            
-            logger.error("[Extractor] Failed to parse JSON or missing analysis key. Content snippet: %r", content[:500])
+
+            logger.error(
+                "[Extractor] Failed to parse JSON or missing analysis key. Content snippet: %r",
+                content[:500],
+            )
             return None
         except Exception:
             logger.exception("CV analysis failed")
@@ -130,38 +133,43 @@ class ProfileExtractor:
         if languages := data.get("languages"):
             user.languages = languages
 
-        # Clear existing history before adding new (simplification for now)
-        # In a real app, we might want to merge or ask the user
-        user.experiences = []
-        user.educations = []
-
+        # Add experiences only if they don't already exist (basic deduplication)
         if experiences := data.get("experiences"):
+            existing_exps = {(e.company, e.title) for e in user.experiences}
             for exp in experiences:
                 if not isinstance(exp, dict):
                     continue
-                user.experiences.append(
-                    Experience(
-                        company=exp.get("company", "Inconnue"),
-                        location=exp.get("location"),
-                        title=exp.get("title", "Poste"),
-                        start_date=exp.get("start_date"),
-                        end_date=exp.get("end_date"),
-                        description=exp.get("description"),
+                company = exp.get("company", "Inconnue")
+                title = exp.get("title", "Poste")
+                if (company, title) not in existing_exps:
+                    user.experiences.append(
+                        Experience(
+                            company=company,
+                            location=exp.get("location"),
+                            title=title,
+                            start_date=exp.get("start_date"),
+                            end_date=exp.get("end_date"),
+                            description=exp.get("description"),
+                        )
                     )
-                )
 
+        # Add educations only if they don't already exist
         if educations := data.get("education"):
+            existing_edus = {(e.institution, e.degree) for e in user.educations}
             for edu in educations:
                 if not isinstance(edu, dict):
                     continue
-                user.educations.append(
-                    Education(
-                        institution=edu.get("institution", "Inconnue"),
-                        degree=edu.get("degree", "Diplôme"),
-                        field=edu.get("field"),
-                        year=edu.get("year"),
+                inst = edu.get("institution", "Inconnue")
+                deg = edu.get("degree", "Diplôme")
+                if (inst, deg) not in existing_edus:
+                    user.educations.append(
+                        Education(
+                            institution=inst,
+                            degree=deg,
+                            field=edu.get("field"),
+                            year=edu.get("year"),
+                        )
                     )
-                )
 
         return user
 

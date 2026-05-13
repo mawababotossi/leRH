@@ -27,6 +27,7 @@ async def verify_api_key(api_key: str = Security(API_KEY_HEADER)) -> str:
         )
 
     if api_key != internal_key:
+        logger.warning("Tentative d'accès API non autorisée (clé invalide)")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Clé API invalide",

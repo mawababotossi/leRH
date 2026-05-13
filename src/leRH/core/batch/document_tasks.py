@@ -119,11 +119,21 @@ async def generate_document_background(
 
     except Exception:
         logger.exception("[bg] ÉCHEC génération %s — user=%s", doc_type, user_id)
+
+        # Rembourser les crédits si la déduction a été faite à l'avance
+        if skip_deduction:
+            try:
+                credit_mgr = CreditManager()
+                await credit_mgr.add(user_id, cost, reason=f"refund_{func_name}_failure")
+                logger.info("[bg] Crédits remboursés — user=%s amount=%d", user_id, cost)
+            except Exception:
+                logger.exception("[bg] ÉCHEC remboursement crédits — user=%s", user_id)
+
         await _send_notification(
             platform=platform,
             chat_id=chat_id,
             relative_path=None,
-            caption="Désolé, la génération de votre document a échoué. Veuillez réessayer.",
+            caption="Désolé, la génération de votre document a échoué. Vos crédits ont été remboursés.",
             absolute_path=None,
         )
 
