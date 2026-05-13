@@ -149,6 +149,22 @@ def _emoji(recommendation: str) -> str:
     )
 
 
+async def cleanup_stale_jobs(days: int = 30) -> int:
+    """Nettoie les offres externes périmées.
+    
+    Args:
+        days: Âge maximum des offres en jours.
+        
+    Returns:
+        Nombre d'offres supprimées.
+    """
+    async with async_session_factory() as session:
+        repo = JobRepository(session)
+        deleted = await repo.cleanup_stale_external_jobs(days)
+        await session.commit()
+        return deleted
+
+
 async def daily_batch() -> dict[str, int]:
     logger.info("=== Daily batch started ===")
     stored = await scrape_and_store()

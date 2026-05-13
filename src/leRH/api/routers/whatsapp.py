@@ -114,22 +114,11 @@ class ReplyResponse(BaseModel):
     reply: str
 
 
-async def get_or_create_user(db: AsyncSession, whatsapp_id: str) -> tuple:
-    """Récupère ou crée un utilisateur WhatsApp.
-
-    Un nouvel utilisateur est créé avec l'état 'new' (non 'awaiting_name') pour
-    que le premier message entrant déclenche l'envoi de WELCOME_INTRO sans
-    consommer le texte comme prénom.
-    """
+async def get_user(db: AsyncSession, whatsapp_id: str) -> User | None:
+    """Récupère un utilisateur WhatsApp s'il existe."""
     clean_id = _clean_jid(whatsapp_id)
     repo = UserRepository(db)
-    user = await repo.get_by_whatsapp(clean_id)
-    created = False
-    if not user:
-        user = await repo.create(whatsapp_id=clean_id, name="")
-        created = True
-        logger.info("New WhatsApp user: %s (%s)", user.id, clean_id)
-    return user, created
+    return await repo.get_by_whatsapp(clean_id)
 
 
 async def _get_local_jobs(db: AsyncSession) -> list:
@@ -143,102 +132,155 @@ async def process_conversation(
     text: str,
     channel: str = "whatsapp",
 ) -> str:
-    user, _ = await get_or_create_user(db, whatsapp_id)
-    memory = ConversationMemory(db, user.id)
-    state = user.conversation_state
-
+    from leRH.db.repository import OnboardingRepository
     from leRH.utils.rate_limiter import check_rate_limit
+
+    clean_id = _clean_jid(whatsapp_id)
 
     if not await check_rate_limit(whatsapp_id):
         return "Vous envoyez trop de messages. Veuillez ralentir."
 
+    # 1. Vérifier si l'utilisateur existe déjà
+    user = await get_user(db, whatsapp_id)
+    if user:
+        memory = ConversationMemory(db, user.id)
+        # Si l'utilisateur est déjà prêt, on utilise l'assistant
+        if user.conversation_state == "ready":
+            await memory.add_message("user", text)
+            history = await memory.build_context()
+            local_jobs = await _get_local_jobs(db)
+            assistant = Assistant(
+                name=user.name or "User",
+                country=user.country,
+                activity=user.activity or "job seeker",
+                skills=user.skills,
+                diploma=user.diploma,
+                experience=user.experience,
+                languages=user.languages,
+                local_jobs=local_jobs,
+                user_id=user.id,
+                platform="whatsapp",
+                chat_id=clean_id,
+                db_session=db,
+            )
+            # Commit avant l'appel LLM pour libérer le verrou SQLite
+            await db.commit()
+            reply = await assistant.interact_with_history(text, history)
+            await memory.add_message("assistant", reply)
+            return reply
+        
+        # Sinon, on continue l'onboarding (cas rare où un User existe mais n'est pas ready)
+        state = user.conversation_state
+    else:
+        # 2. Gestion de l'onboarding via session temporaire
+        onboarding_repo = OnboardingRepository(db)
+        session = await onboarding_repo.get(clean_id, "whatsapp")
+        
+        if not session:
+            # Premier contact : créer la session et envoyer Bienvenue
+            await onboarding_repo.create(clean_id, "whatsapp")
+            return WELCOME_INTRO
+
+        state = session.state
+        data = session.data or {}
+
     try:
         match state:
             case "new":
-                # Premier contact : envoyer le message de bienvenue.
-                # Ne pas sauvegarder le texte reçu comme prénom — c'est
-                # probablement une salutation ("Bonjour", "Salut"...).
-                user.conversation_state = "awaiting_name"
-                await db.flush()
-                await memory.add_message("assistant", WELCOME_INTRO)
-                return WELCOME_INTRO
-
-            case "awaiting_name":
-                # L'utilisateur répond au "Quel est votre prénom ?"
+                # On vient de recevoir le premier message après le WELCOME_INTRO
+                # On traite ce message comme le prénom (sauf si c'est une salutation)
                 name_candidate = text.strip()
                 if _looks_like_greeting(name_candidate):
-                    retry = (
-                        "Je n'ai pas bien compris votre prénom 😊\n"
-                        "Pouvez-vous me donner juste votre prénom ? "
-                        "(ex: Kofi, Amina, Jean-Pierre)"
+                    return (
+                        "Enchanté ! 😊 Pour commencer, pouvez-vous me donner votre *prénom* ?"
                     )
-                    await memory.add_message("assistant", retry)
-                    return retry
-                user.name = name_candidate[:255]
-                user.conversation_state = "awaiting_country"
+                
+                if user:
+                    user.name = name_candidate[:255]
+                    user.conversation_state = "awaiting_country"
+                else:
+                    session.data = {**data, "name": name_candidate[:255]}
+                    session.state = "awaiting_country"
+                
                 await db.flush()
-                country_q = COUNTRY_QUESTION.format(name=name_candidate)
-                await memory.add_message("assistant", country_q)
-                return country_q
+                return COUNTRY_QUESTION.format(name=name_candidate)
 
             case "awaiting_country":
-                user.country = text.strip()[:255]
-                user.conversation_state = "awaiting_activity"
+                country = text.strip()[:255]
+                if user:
+                    user.country = country
+                    user.conversation_state = "awaiting_activity"
+                else:
+                    session.data = {**data, "country": country}
+                    session.state = "awaiting_activity"
+                
                 await db.flush()
-                await memory.add_message("assistant", ACTIVITY_QUESTION)
                 return ACTIVITY_QUESTION
 
             case "awaiting_activity":
-                user.activity = text.strip()[:255]
-                user.conversation_state = "awaiting_skills"
+                activity = text.strip()[:255]
+                if user:
+                    user.activity = activity
+                    user.conversation_state = "awaiting_skills"
+                else:
+                    session.data = {**data, "activity": activity}
+                    session.state = "awaiting_skills"
+                
                 await db.flush()
-                await memory.add_message("assistant", SKILLS_QUESTION)
                 return SKILLS_QUESTION
 
             case "awaiting_skills":
-                # On parse les compétences séparées par des virgules
                 raw_skills = text.strip()
                 skills_list = [s.strip()[:100] for s in raw_skills.split(",") if s.strip()][:20]
-                user.skills = skills_list
-                user.conversation_state = "awaiting_diploma"
+                if user:
+                    user.skills = skills_list
+                    user.conversation_state = "awaiting_diploma"
+                else:
+                    session.data = {**data, "skills": skills_list}
+                    session.state = "awaiting_diploma"
+                
                 await db.flush()
-                await memory.add_message("assistant", DIPLOMA_QUESTION)
                 return DIPLOMA_QUESTION
 
             case "awaiting_diploma":
-                user.diploma = text.strip()[:255]
-                user.conversation_state = "ready"
+                diploma = text.strip()[:255]
+                
+                if user:
+                    user.diploma = diploma
+                    user.conversation_state = "ready"
+                    user_name = user.name
+                else:
+                    # FIN DE L'ONBOARDING : Création de l'utilisateur réel
+                    user_repo = UserRepository(db)
+                    user = await user_repo.create(
+                        whatsapp_id=clean_id,
+                        name=data.get("name", ""),
+                        country=data.get("country", "Togo"),
+                        activity=data.get("activity"),
+                        skills=data.get("skills"),
+                        diploma=diploma,
+                        conversation_state="ready",
+                        credits=10
+                    )
+                    user_name = user.name
+                    # Supprimer la session temporaire
+                    await onboarding_repo.delete(clean_id, "whatsapp")
+                
                 await db.flush()
-                ready_msg = READY_MESSAGE.format(name=user.name or "")
+                ready_msg = READY_MESSAGE.format(name=user_name or "")
+                
+                # Initialiser la mémoire avec le message de bienvenue prêt
+                memory = ConversationMemory(db, user.id)
                 await memory.add_message("assistant", ready_msg)
+                
                 return ready_msg
 
-            case "ready":
-                await memory.add_message("user", text)
-                history = await memory.build_context()
-                local_jobs = await _get_local_jobs(db)
-                assistant = Assistant(
-                    name=user.name or "User",
-                    country=user.country,
-                    activity=user.activity or "job seeker",
-                    skills=user.skills,
-                    diploma=user.diploma,
-                    experience=user.experience,
-                    languages=user.languages,
-                    local_jobs=local_jobs,
-                    user_id=user.id,
-                    credits=user.credits or 0,
-                    platform="whatsapp",
-                    chat_id=_clean_jid(whatsapp_id),
-                    db_session=db,
-                )
-                reply = await assistant.interact_with_history(text, history)
-                await memory.add_message("assistant", reply)
-                return reply
-
             case _:
-                # État inconnu ou corrompu : repartir à zéro proprement.
-                user.conversation_state = "new"
+                # État inconnu : reset
+                if user:
+                    user.conversation_state = "new"
+                else:
+                    session.state = "new"
                 await db.flush()
                 return WELCOME_INTRO
 
@@ -286,7 +328,7 @@ async def whatsapp_document(
             analysis = result.get("analysis", "")
             profile = result.get("profile", {})
             if profile:
-                user = extractor.enrich_user(user, profile)
+                user = extractor.enrich_user(user, {**result, **profile})
             cv_analysis = result
         else:
             analysis = "Analyse non disponible."
@@ -329,14 +371,20 @@ async def whatsapp_voice(
 ) -> ReplyResponse:
     from leRH.services.audio_processor import AudioProcessor
 
-    user, _ = await get_or_create_user(db, payload.from_)
-    memory = ConversationMemory(db, user.id)
-
+    clean_id = _clean_jid(payload.from_)
+    user = await get_user(db, payload.from_)
+    
     ap = AudioProcessor()
     transcription = ap.transcribe_base64(payload.audio_base64, payload.mimetype)
     if not transcription:
         return ReplyResponse(reply="Je n'ai pas compris le message audio. Pouvez-vous réessayer ?")
 
+    if not user:
+        # En onboarding
+        reply = await process_conversation(db, payload.from_, transcription)
+        return ReplyResponse(reply=reply)
+
+    memory = ConversationMemory(db, user.id)
     await memory.add_message("user", f"[voice] {transcription}")
 
     if user.conversation_state != "ready":
@@ -363,9 +411,11 @@ async def whatsapp_voice(
             user_id=user.id,
             credits=user.credits or 0,
             platform="whatsapp",
-            chat_id=_clean_jid(payload.from_),
+            chat_id=clean_id,
             db_session=db,
         )
+        # Commit avant l'appel LLM pour libérer le verrou SQLite
+        await db.commit()
         reply_en = await assistant.interact_with_history(en_text, history)
         try:
             reply_ewe = await tl.translate(reply_en, "eng_Latn", "ewe_Latn")

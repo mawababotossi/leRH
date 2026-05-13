@@ -1,7 +1,4 @@
-/**
- * leRH — WhatsApp Bot (Baileys)
- */
-
+import "dotenv/config";
 import { Boom } from "@hapi/boom";
 import { downloadContentFromMessage, jidNormalizedUser, makeCacheableSignalKeyStore } from "@whiskeysockets/baileys";
 import qrcode from "qrcode-terminal";
@@ -428,13 +425,7 @@ async function pollPendingMessages(): Promise<void> {
   const pendingUrl = `${BASE_URL}/api/whatsapp/pending`;
 
   try {
-    const res = await fetch(pendingUrl);
-    if (!res.ok) {
-      logger.warn({ status: res.status }, "Failed to fetch pending messages");
-      return;
-    }
-
-    const messages: PendingMessage[] = await res.json();
+    const messages = await apiRequest<PendingMessage[]>("/api/whatsapp/pending");
     if (messages.length === 0) return;
 
     logger.info({ count: messages.length }, "Processing pending messages");
@@ -462,18 +453,16 @@ async function pollPendingMessages(): Promise<void> {
 
           await sendMediaMessage(jid, media, caption);
           // ACK après envoi réussi — le message ne sera plus retourné par /pending
-          await fetch(`${BASE_URL}/api/whatsapp/pending/ack`, {
+          await apiRequest("/api/whatsapp/pending/ack", {
             method: "POST",
-            headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ ids: [msg.id] }),
           }).catch((e) => logger.warn({ e }, "ACK request failed (non-fatal)"));
         } else if (msg.text) {
           await sock.sendMessage(jid, { text: msg.text + "\u200B" });
           logger.info({ id: msg.id }, "Text message sent");
           // ACK après envoi réussi
-          await fetch(`${BASE_URL}/api/whatsapp/pending/ack`, {
+          await apiRequest("/api/whatsapp/pending/ack", {
             method: "POST",
-            headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ ids: [msg.id] }),
           }).catch((e) => logger.warn({ e }, "ACK request failed (non-fatal)"));
         }
@@ -498,8 +487,7 @@ async function pollPendingMessages(): Promise<void> {
 
 async function checkApiHealth() {
   try {
-    const res = await fetch(`${BASE_URL}/health`);
-    const data = await res.json();
+    const data = await apiRequest("/health");
     logger.info({ data }, "API health OK");
   } catch (err) {
     logger.warn({ err }, "API not reachable on startup");

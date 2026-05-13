@@ -23,7 +23,6 @@ def set_sqlite_pragma(dbapi_connection, connection_record):
 
 async_session_factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
-_db_write_lock = asyncio.Lock()
 
 naming_convention = {
     "ix": "ix_%(column_0_label)s",
@@ -48,23 +47,3 @@ async def get_db() -> AsyncSession:
             raise
         finally:
             await session.close()
-
-
-class DBLock:
-    """Wrapper asyncio.Lock pour sérialiser les écritures SQLite."""
-
-    @staticmethod
-    async def acquire():
-        await _db_write_lock.acquire()
-
-    @staticmethod
-    def release():
-        _db_write_lock.release()
-
-    @staticmethod
-    async def __aenter__():
-        await _db_write_lock.acquire()
-
-    @staticmethod
-    async def __aexit__(*_args):
-        _db_write_lock.release()

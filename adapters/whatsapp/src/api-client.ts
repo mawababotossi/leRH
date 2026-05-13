@@ -29,6 +29,10 @@ export async function apiRequest<T = unknown>(
     ...(options.headers as Record<string, string>),
   };
 
+  if (!headers["X-API-Key"]) {
+    console.warn(`[API Client] Missing X-API-Key for request to ${url}`);
+  }
+
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 120_000);
 

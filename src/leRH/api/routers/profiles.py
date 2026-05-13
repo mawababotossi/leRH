@@ -48,7 +48,7 @@ async def analyze_cv(
     )
 
     if profile:
-        user = extractor.enrich_user(user, profile)
+        user = extractor.enrich_user(user, {**result, **profile})
         await db.flush()
 
     return ProfileResponse(

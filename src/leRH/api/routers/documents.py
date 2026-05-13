@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from io import BytesIO
 from zipfile import ZIP_DEFLATED, ZipFile
@@ -86,10 +87,14 @@ async def generate_cv(
         )
 
     await _check_credits(payload.user_id, CV_COST, session=db)
+    # Commit avant l'appel LLM pour libérer le verrou SQLite
+    await db.commit()
 
     try:
         gen = DocumentGenerator()
-        buf, filename = gen.generate_cv(user, job, fmt=payload.format, cv_analysis=cv_analysis)
+        buf, filename = await asyncio.to_thread(
+            gen.generate_cv, user, job, fmt=payload.format, cv_analysis=cv_analysis
+        )
         await _deduct_credits(payload.user_id, CV_COST, f"generate_cv_{job.id}", session=db)
 
         content_type = (
@@ -131,11 +136,13 @@ async def generate_cover_letter(
     cv_analysis = cv_record.analysis if cv_record else None
 
     await _check_credits(payload.user_id, COVER_LETTER_COST, session=db)
+    # Commit avant l'appel LLM pour libérer le verrou SQLite
+    await db.commit()
 
     try:
         gen = DocumentGenerator()
-        buf, filename = gen.generate_cover_letter(
-            user, job, fmt=payload.format, cv_analysis=cv_analysis
+        buf, filename = await asyncio.to_thread(
+            gen.generate_cover_letter, user, job, fmt=payload.format, cv_analysis=cv_analysis
         )
         await _deduct_credits(
             payload.user_id, COVER_LETTER_COST, f"generate_cover_letter_{job.id}", session=db
@@ -180,14 +187,16 @@ async def generate_all(
     cv_analysis = cv_record.analysis if cv_record else None
 
     await _check_credits(payload.user_id, CV_COST + COVER_LETTER_COST, session=db)
+    # Commit avant l'appel LLM pour libérer le verrou SQLite
+    await db.commit()
 
     try:
         gen = DocumentGenerator()
-        cv_buf, cv_filename = gen.generate_cv(
-            user, job, fmt=payload.format, cv_analysis=cv_analysis
+        cv_buf, cv_filename = await asyncio.to_thread(
+            gen.generate_cv, user, job, fmt=payload.format, cv_analysis=cv_analysis
         )
-        cl_buf, cl_filename = gen.generate_cover_letter(
-            user, job, fmt=payload.format, cv_analysis=cv_analysis
+        cl_buf, cl_filename = await asyncio.to_thread(
+            gen.generate_cover_letter, user, job, fmt=payload.format, cv_analysis=cv_analysis
         )
         await _deduct_credits(
             payload.user_id, CV_COST + COVER_LETTER_COST, f"generate_all_{job.id}", session=db

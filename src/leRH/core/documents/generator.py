@@ -347,29 +347,43 @@ class DocumentGenerator:
         if not content or not content.strip():
             return None
 
-        # Cas 1 : JSON pur
+        json_str = self._extract_json_str(content)
+        if not json_str:
+            return None
+
+        json_str = self._cleanup_json(json_str)
         try:
-            return json.loads(content)
+            return json.loads(json_str)
+        except json.JSONDecodeError:
+            pass
+        return None
+
+    def _extract_json_str(self, content: str) -> str | None:
+        """Extrait la chaine JSON du contenu du LLM."""
+        # JSON pur
+        try:
+            json.loads(content)
+            return content
         except json.JSONDecodeError:
             pass
 
-        # Cas 2 : bloc markdown ```json ... ``` ou ``` ... ```
-        md_match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", content, re.DOTALL)
+        # Bloc markdown ```json ... ``` ou ``` ... ```
+        md_match = re.search(r"```(?:json)?\s*(\{.*\})\s*```", content, re.DOTALL)
         if md_match:
-            try:
-                return json.loads(md_match.group(1))
-            except json.JSONDecodeError:
-                pass
+            return md_match.group(1)
 
-        # Cas 3 : JSON embarque dans du texte
+        # JSON embarque dans du texte
         match = re.search(r"\{.*\}", content, re.DOTALL)
         if match:
-            try:
-                return json.loads(match.group())
-            except json.JSONDecodeError:
-                pass
+            return match.group()
 
         return None
+
+    @staticmethod
+    def _cleanup_json(text: str) -> str:
+        """Nettoie les erreurs JSON courantes des LLM."""
+        text = re.sub(r",\s*([}\]])", r"\1", text)
+        return text
 
     def generate_cv_content(
         self, user: User, job: Job, cv_analysis: dict | None = None
@@ -497,14 +511,17 @@ class DocumentGenerator:
         contact_parts = []
         if user.phone:
             contact_parts.append(user.phone)
-        if user.city:
-            contact_parts.append(user.city)
+        if user.email:
+            contact_parts.append(user.email)
+        if user.city or user.address:
+            loc = user.city or ""
+            if user.address:
+                loc = f"{user.address}, {loc}" if loc else user.address
+            contact_parts.append(loc)
         if user.linkedin_url:
             contact_parts.append(f"LinkedIn: {user.linkedin_url}")
         if user.github_url:
             contact_parts.append(f"GitHub: {user.github_url}")
-        
-        contact_parts.append("Email: disponible sur demande")
         contact_para = doc.add_paragraph()
         contact_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
         contact_run = contact_para.add_run(" | ".join(contact_parts))
@@ -660,9 +677,13 @@ class DocumentGenerator:
             run.font.size = Pt(11)
             run.bold = True
 
-        if user.phone:
-            phone_para = doc.add_paragraph(user.phone)
-            for run in phone_para.runs:
+        contact_line = []
+        if user.phone: contact_line.append(user.phone)
+        if user.email: contact_line.append(user.email)
+        
+        if contact_line:
+            contact_para = doc.add_paragraph(" | ".join(contact_line))
+            for run in contact_para.runs:
                 run.font.name = "Calibri"
                 run.font.size = Pt(10)
                 run.font.color.rgb = RGBColor(0x55, 0x55, 0x55)
@@ -737,14 +758,17 @@ class DocumentGenerator:
         contact_parts = []
         if user.phone:
             contact_parts.append(user.phone)
-        if user.city:
-            contact_parts.append(user.city)
+        if user.email:
+            contact_parts.append(user.email)
+        if user.city or user.address:
+            loc = user.city or ""
+            if user.address:
+                loc = f"{user.address}, {loc}" if loc else user.address
+            contact_parts.append(loc)
         if user.linkedin_url:
             contact_parts.append(f"LinkedIn: {user.linkedin_url}")
         if user.github_url:
             contact_parts.append(f"GitHub: {user.github_url}")
-            
-        contact_parts.append("Email: disponible sur demande")
 
         pdf.set_font(PDF_FONT, "", 9)
         pdf.set_text_color(100, 100, 100)
@@ -866,10 +890,15 @@ class DocumentGenerator:
 
         pdf.set_font(PDF_FONT, "B", 11)
         pdf.cell(0, 6, user.name, new_x="LMARGIN", new_y="NEXT")
-        if user.phone:
+        
+        contact_line = []
+        if user.phone: contact_line.append(user.phone)
+        if user.email: contact_line.append(user.email)
+        
+        if contact_line:
             pdf.set_font(PDF_FONT, "", 9)
             pdf.set_text_color(100, 100, 100)
-            pdf.cell(0, 5, user.phone, new_x="LMARGIN", new_y="NEXT")
+            pdf.cell(0, 5, " | ".join(contact_line), new_x="LMARGIN", new_y="NEXT")
             pdf.set_text_color(0, 0, 0)
 
         buf = BytesIO()

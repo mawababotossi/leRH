@@ -40,15 +40,41 @@ class UserRepository:
         return list(result.scalars().all())
 
     async def create(self, **kwargs) -> User:
+        import asyncio
         user = User(**kwargs)
         self.session.add(user)
-        await self.session.flush()
+        
+        max_retries = 5
+        for attempt in range(max_retries):
+            try:
+                await self.session.flush()
+                return user
+            except Exception as e:
+                if attempt < max_retries - 1 and "database is locked" in str(e).lower():
+                    wait = (attempt + 1) * 0.2
+                    logger.warning("DB locked on create, retry %d/%d", attempt + 1, max_retries)
+                    await asyncio.sleep(wait)
+                else:
+                    raise
         return user
 
     async def update(self, user: User, **kwargs) -> User:
+        import asyncio
         for key, value in kwargs.items():
             setattr(user, key, value)
-        await self.session.flush()
+        
+        max_retries = 5
+        for attempt in range(max_retries):
+            try:
+                await self.session.flush()
+                return user
+            except Exception as e:
+                if attempt < max_retries - 1 and "database is locked" in str(e).lower():
+                    wait = (attempt + 1) * 0.2
+                    logger.warning("DB locked on update, retry %d/%d", attempt + 1, max_retries)
+                    await asyncio.sleep(wait)
+                else:
+                    raise
         return user
 
 
@@ -118,6 +144,37 @@ class JobRepository:
         )
         return list(result.scalars().all())
 
+    async def cleanup_stale_external_jobs(self, days: int = 30) -> int:
+        """Supprime les offres externes périmées.
+        
+        Args:
+            days: Âge maximum en jours. Défaut: 30.
+            
+        Returns:
+            Nombre d'offres supprimées.
+        """
+        import logging
+        from datetime import UTC, datetime, timedelta
+
+        logger = logging.getLogger(__name__)
+        cutoff = datetime.now(UTC) - timedelta(days=days)
+        
+        result = await self.session.execute(
+            select(Job).where(
+                Job.is_external.is_(True),
+                Job.created_at < cutoff,
+            )
+        )
+        stale_jobs = list(result.scalars().all())
+        
+        count = len(stale_jobs)
+        for job in stale_jobs:
+            await self.session.delete(job)
+        
+        if count > 0:
+            logger.info("[JobRepository] %d offres externes périmées supprimées (>%d jours)", count, days)
+        return count
+
     async def search(self, query: str | None = None, city: str | None = None) -> list[Job]:
         stmt = select(Job)
         if query:
@@ -127,6 +184,28 @@ class JobRepository:
         stmt = stmt.order_by(Job.created_at.desc())
         result = await self.session.execute(stmt)
         return list(result.scalars().all())
+
+    async def upsert_external_job(self, **kwargs) -> Job:
+        """Crée ou met à jour une offre externe (web).
+        
+        Utilise l'URL comme clé d'unicité.
+        """
+        source_url = kwargs.get("source_url")
+        if not source_url:
+            return await self.create(**kwargs)
+
+        result = await self.session.execute(
+            select(Job).where(Job.source_url == source_url)
+        )
+        job = result.scalar_one_or_none()
+
+        if job:
+            for key, value in kwargs.items():
+                setattr(job, key, value)
+            await self.session.flush()
+            return job
+        else:
+            return await self.create(**kwargs)
 
     async def create(self, **kwargs) -> Job:
         job = Job(**kwargs)
@@ -221,3 +300,62 @@ class MessageRepository:
         self.session.add(msg)
         await self.session.flush()
         return msg
+
+
+class OnboardingRepository:
+    def __init__(self, session: AsyncSession) -> None:
+        self.session = session
+
+    async def get(self, platform_id: str, platform: str) -> OnboardingSession | None:
+        from leRH.db.models import OnboardingSession
+
+        result = await self.session.execute(
+            select(OnboardingSession).where(
+                OnboardingSession.platform_id == platform_id, OnboardingSession.platform == platform
+            )
+        )
+        return result.scalar_one_or_none()
+
+    async def create(self, platform_id: str, platform: str) -> OnboardingSession:
+        from leRH.db.models import OnboardingSession
+        import asyncio
+
+        session = OnboardingSession(platform_id=platform_id, platform=platform, state="new", data={})
+        self.session.add(session)
+        
+        max_retries = 5
+        for attempt in range(max_retries):
+            try:
+                await self.session.flush()
+                return session
+            except Exception as e:
+                if attempt < max_retries - 1 and "database is locked" in str(e).lower():
+                    wait = (attempt + 1) * 0.2
+                    logger.warning("DB locked on session create, retry %d/%d", attempt + 1, max_retries)
+                    await asyncio.sleep(wait)
+                else:
+                    raise
+        return session
+
+    async def delete(self, platform_id: str, platform: str) -> None:
+        from sqlalchemy import delete
+        from leRH.db.models import OnboardingSession
+        import asyncio
+
+        max_retries = 5
+        for attempt in range(max_retries):
+            try:
+                await self.session.execute(
+                    delete(OnboardingSession).where(
+                        OnboardingSession.platform_id == platform_id, OnboardingSession.platform == platform
+                    )
+                )
+                await self.session.flush()
+                return
+            except Exception as e:
+                if attempt < max_retries - 1 and "database is locked" in str(e).lower():
+                    wait = (attempt + 1) * 0.2
+                    logger.warning("DB locked on session delete, retry %d/%d", attempt + 1, max_retries)
+                    await asyncio.sleep(wait)
+                else:
+                    raise

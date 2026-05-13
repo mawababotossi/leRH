@@ -56,7 +56,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 analysis_text = result.get("analysis", "")
                 profile = result.get("profile", {})
                 if profile and user:
-                    user = extractor.enrich_user(user, profile)
+                    user = extractor.enrich_user(user, {**result, **profile})
 
             if user:
                 cv_repo = CVRepository(session)

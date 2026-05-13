@@ -18,8 +18,12 @@ CV TEXT:
 {cv_text}
 
 Respond with a VALID JSON object containing:
-1. "analysis": brief analysis in French (max 150 words) covering: main skills, experience level, expertise areas, strengths
-2. "profile": object with:
+1. "full_name": candidate's full name (string)
+2. "email": candidate's email address (string or null)
+3. "phone": candidate's phone number (string or null)
+4. "address": candidate's physical address (string or null)
+5. "analysis": brief analysis in French (max 150 words) covering: main skills, experience level, expertise areas, strengths
+6. "profile": object with:
    - skills: list of skill strings
    - diploma: highest degree (string or null)
    - experience_summary: brief professional experience summary (string)
@@ -29,7 +33,7 @@ Respond with a VALID JSON object containing:
    - social: {{"linkedin": "...", "github": "...", "website": "..."}}
 
 Example:
-{{"analysis": "Le candidat a 5 ans d'expérience...", "profile": {{"skills": ["Python"], "diploma": "Master", "experiences": [{{"company": "Google", "title": "Dev"}}]}}}}
+{{"full_name": "Jean Dupont", "email": "jean@dupont.com", "analysis": "...", "profile": {{"skills": ["Python"]}}}}
 
 Return ONLY the JSON object, no other text."""
 
@@ -98,6 +102,8 @@ class ProfileExtractor:
 
     @staticmethod
     def _parse_json(content: str) -> dict | None:
+        if not content or not content.strip():
+            return None
         try:
             return json.loads(content)
         except json.JSONDecodeError:
@@ -105,7 +111,8 @@ class ProfileExtractor:
         match = re.search(r"\{.*\}", content, re.DOTALL)
         if match:
             try:
-                return json.loads(match.group())
+                text = re.sub(r",\s*([}\]])", r"\1", match.group())
+                return json.loads(text)
             except json.JSONDecodeError:
                 pass
         return None
@@ -113,6 +120,19 @@ class ProfileExtractor:
     @staticmethod
     def enrich_user(user: User, data: dict) -> User:
         from leRH.db.models import Education, Experience
+
+        if full_name := data.get("full_name"):
+            # Ne mettre à jour que si ce n'est pas un prénom court (onboarding)
+            # ou si le nom actuel est vide
+            if not user.name or len(full_name.split()) > len(user.name.split()):
+                user.name = full_name[:255]
+
+        if email := data.get("email"):
+            user.email = email[:255]
+        if phone := data.get("phone"):
+            user.phone = phone[:50]
+        if address := data.get("address"):
+            user.address = address
 
         if skills := data.get("skills"):
             user.skills = skills

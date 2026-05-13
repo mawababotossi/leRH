@@ -39,6 +39,8 @@ class User(Base):
     github_url: Mapped[str | None] = mapped_column(String(255), nullable=True)
     website_url: Mapped[str | None] = mapped_column(String(255), nullable=True)
     summary_override: Mapped[str | None] = mapped_column(Text, nullable=True)
+    email: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    address: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     conversation_state: Mapped[str] = mapped_column(String(50), default="new")
 
@@ -118,7 +120,7 @@ class Job(Base):
     __tablename__ = "jobs"
 
     id: Mapped[str] = mapped_column(String(12), primary_key=True, default=_uuid)
-    recruiter_id: Mapped[str] = mapped_column(ForeignKey("users.id"))
+    recruiter_id: Mapped[str | None] = mapped_column(ForeignKey("users.id"), nullable=True)
 
     title: Mapped[str] = mapped_column(String(255))
     description: Mapped[str] = mapped_column(Text)
@@ -221,3 +223,16 @@ class RateLimitEntry(Base):
 
     key: Mapped[str] = mapped_column(String(255), primary_key=True)
     timestamp: Mapped[datetime] = mapped_column(DateTime, primary_key=True, default=func.now())
+
+
+class OnboardingSession(Base):
+    __tablename__ = "onboarding_sessions"
+
+    platform_id: Mapped[str] = mapped_column(String(255), primary_key=True)
+    platform: Mapped[str] = mapped_column(String(20), primary_key=True)  # whatsapp, telegram
+    state: Mapped[str] = mapped_column(String(50), default="new")
+    data: Mapped[dict | None] = mapped_column(JSON, nullable=True)  # name, country, activity, etc.
+
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now(), onupdate=func.now()
+    )

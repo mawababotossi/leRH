@@ -18,7 +18,7 @@ from leRH.core.credits import (
     CreditManager,
 )
 from leRH.core.tools.job_search import search_jobs_online
-from leRH.db.base import DBLock, async_session_factory
+from leRH.db.base import async_session_factory
 from leRH.db.models import Job
 from leRH.db.repository import SubscriptionRepository, UserRepository
 
@@ -214,11 +214,12 @@ class Assistant:
                     "parameters": {
                         "type": "object",
                         "properties": {
-                            "job_title": {
+                            "job_id": {
                                 "type": "string",
                                 "description": (
-                                    "Titre exact ou approximatif de l'offre d'emploi"
-                                    " pour laquelle generer le CV."
+                                    "ID de l'offre d'emploi provenant EXCLUSIVEMENT des resultats"
+                                    " de search_local_jobs ou search_web_jobs. N'invente jamais"
+                                    " d'ID – utilise uniquement ceux retournes par ces outils."
                                 ),
                             },
                             "confirmed": {
@@ -229,7 +230,7 @@ class Assistant:
                                 ),
                             },
                         },
-                        "required": ["job_title"],
+                        "required": ["job_id"],
                     },
                 },
             }
@@ -248,11 +249,12 @@ class Assistant:
                     "parameters": {
                         "type": "object",
                         "properties": {
-                            "job_title": {
+                            "job_id": {
                                 "type": "string",
                                 "description": (
-                                    "Titre exact ou approximatif de l'offre d'emploi"
-                                    " pour laquelle generer la lettre."
+                                    "ID de l'offre d'emploi provenant EXCLUSIVEMENT des resultats"
+                                    " de search_local_jobs ou search_web_jobs. N'invente jamais"
+                                    " d'ID – utilise uniquement ceux retournes par ces outils."
                                 ),
                             },
                             "confirmed": {
@@ -263,7 +265,7 @@ class Assistant:
                                 ),
                             },
                         },
-                        "required": ["job_title"],
+                        "required": ["job_id"],
                     },
                 },
             }
@@ -464,17 +466,37 @@ class Assistant:
         )
         return matches[:max_results]
 
-    def _find_job_by_title(self, title_query: str) -> Job | None:
-        words = title_query.lower().split()
+    def _find_job_by_title(self, title_query: str, min_score: float = 70.0) -> Job | None:
+        """Trouve une offre par titre avec score minimum.
+        
+        Args:
+            title_query: Titre ou description recherchée.
+            min_score: Score minimum requis (0-100). Défaut: 70%.
+            
+        Returns:
+            L'offre correspondante si le score >= min_score, sinon None.
+        """
+        words = [w for w in title_query.lower().split() if len(w) > 2]
+        if not words:
+            return None
+            
         best_score = 0
         best_job = None
         for job in self.local_jobs:
             text = f"{job.title} {job.description}".lower()
-            score = sum(1 for w in words if w in text and len(w) > 2)
-            if score > best_score:
-                best_score = score
-                best_job = job
-        return best_job
+            matches = sum(1 for w in words if w in text)
+            if matches > 0:
+                score = (matches / len(words)) * 100
+                if score > best_score:
+                    best_score = score
+                    best_job = job
+        
+        if best_score >= min_score:
+            logger.info("[JobMatch] Offre sélectionnée: '%s' (score: %.1f%%)", best_job.title, best_score)
+            return best_job
+            
+        logger.info("[JobMatch] Aucune offre avec score suffisant (meilleur: %.1f%% < %d%%)", best_score, min_score)
+        return None
 
     async def _handle_tool_call(self, tool_call) -> str:
         func_name = tool_call.function.name
@@ -493,6 +515,7 @@ class Assistant:
             return json.dumps(
                 [
                     {
+                        "id": j.id,
                         "title": j.title,
                         "company": j.company or "",
                         "city": j.city or "",
@@ -507,14 +530,30 @@ class Assistant:
         if func_name == "search_web_jobs":
             query = args.get("query", "")
             results = search_jobs_online(query) if query else []
+            
+            persisted_jobs = []
+            if results and self._db_session:
+                from leRH.db.repository import JobRepository
+                repo = JobRepository(self._db_session)
+                for r in results:
+                    job = await repo.upsert_external_job(
+                        title=r.title,
+                        description=r.snippet,
+                        source_url=r.url,
+                        is_external=True,
+                        status="active"
+                    )
+                    persisted_jobs.append(job)
+            
             return json.dumps(
                 [
                     {
-                        "title": r.title,
-                        "snippet": r.snippet[:300] if r.snippet else "",
-                        "url": r.url,
+                        "id": j.id,
+                        "title": j.title,
+                        "snippet": j.description[:300] if j.description else "",
+                        "url": j.source_url,
                     }
-                    for r in (results or [])
+                    for j in persisted_jobs
                 ],
                 ensure_ascii=False,
             )
@@ -562,18 +601,37 @@ class Assistant:
                 }
             )
 
-        job_title = args.get("job_title", "")
-        if not job_title:
-            return json.dumps({"error": "Veuillez specifier le titre du poste."})
+        job_id = args.get("job_id", "")
+        if not job_id:
+            return json.dumps({"error": "ID de l'offre manquant."})
 
-        job = self._find_job_by_title(job_title)
+        from leRH.db.repository import JobRepository
+
+        repo = JobRepository(self._db_session)
+        job = await repo.get_by_id(job_id)
+
         if not job:
+            # Fallback : tenter de trouver par titre si l'ID ressemble a un titre
+            fallback = self._find_job_by_title(job_id, min_score=50.0) if self.local_jobs else None
+            hint = ""
+            if fallback:
+                hint = (
+                    f" Offre similaire trouvee : « {fallback.title} » (id: {fallback.id})."
+                    f" Utilise cet ID si c'est bien l'offre visee."
+                )
+            else:
+                # Lister les IDs disponibles pour aider le LLM
+                ids = [j.id for j in (self.local_jobs or [])[:5]]
+                if ids:
+                    hint = f" IDs disponibles dans la base : {', '.join(ids)}."
             return json.dumps(
                 {
                     "error": (
-                        f"Je n'ai pas trouve d'offre correspondant à « {job_title} »."
-                        " Pouvez-vous etre plus precis ?"
-                    )
+                        f"Je n'ai pas trouvé l'offre avec l'ID « {job_id} ».{hint}"
+                        " Veuillez refaire une recherche avec search_local_jobs"
+                        " ou search_web_jobs et utiliser l'ID retourne."
+                    ),
+                    "suggested_id": fallback.id if fallback else None,
                 }
             )
 
@@ -698,7 +756,7 @@ class Assistant:
                 session=self._db_session,
             )
         else:
-            async with DBLock(), async_session_factory() as session:
+            async with async_session_factory() as session:
                 user_repo = UserRepository(session)
                 user = await user_repo.get_by_id(self.user_id)
                 if not user:
@@ -720,6 +778,7 @@ class Assistant:
                 await credit_mgr.add(
                     self.user_id, SUBSCRIPTION_BONUS, reason="subscription_bonus", session=session
                 )
+                await session.commit()
 
         return json.dumps(
             {
