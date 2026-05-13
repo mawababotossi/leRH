@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import logging
 from io import BytesIO
-from urllib.parse import unquote
 from zipfile import ZIP_DEFLATED, ZipFile
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -222,10 +221,21 @@ MIME_TYPES = {
 @router.get("/download/{filepath:path}")
 async def download_file(filepath: str):
     logger.info("Download request: raw=%s", filepath)
-    decoded_path = unquote(filepath)
-    file_path = GENERATED_DIR / decoded_path
-    if not file_path.resolve().is_relative_to(GENERATED_DIR.resolve()):
+
+    # Rejeter tout chemin contenant des séquences suspectes
+    if ".." in filepath or filepath.startswith("/"):
+        logger.warning("Invalid path attempt: %s", filepath)
+        raise HTTPException(status_code=400, detail="Chemin invalide")
+
+    # GENERATED_DIR doit être résolu
+    safe_base = GENERATED_DIR.resolve()
+    file_path = (safe_base / filepath).resolve()
+
+    # Vérification stricte que le chemin résolu commence par le préfixe autorisé
+    if not str(file_path).startswith(str(safe_base) + "/"):
+        logger.warning("Path traversal attempt blocked: %s", filepath)
         raise HTTPException(status_code=403, detail="Accès refusé")
+
     logger.info("Download request: full_path=%s exists=%s", file_path, file_path.exists())
     if not file_path.exists():
         raise HTTPException(status_code=404, detail="Fichier non trouvé")

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import UTC, datetime
 
@@ -16,13 +17,14 @@ logger = logging.getLogger(__name__)
 
 
 async def scrape_and_store() -> int:
+    loop = asyncio.get_running_loop()
     scraper = EmploiTgScraper()
-    raw_jobs = scraper.scrape()
+    raw_jobs = await loop.run_in_executor(None, scraper.scrape)
     if not raw_jobs:
         logger.info("No jobs scraped")
         return 0
 
-    enriched = enrich_jobs(raw_jobs)
+    enriched = await loop.run_in_executor(None, lambda: enrich_jobs(raw_jobs))
     stored = 0
 
     async with async_session_factory() as session:

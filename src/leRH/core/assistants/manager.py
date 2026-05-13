@@ -69,7 +69,7 @@ class Assistant:
         self._db_session = db_session
 
         self._client = OpenAI(
-            api_key=settings.openai_api_key,
+            api_key=settings.openai_api_key.get_secret_value(),
             base_url=settings.openai_base_url,
             timeout=settings.openai_timeout,
         )
@@ -580,18 +580,6 @@ class Assistant:
         cost = CV_COST if func_name == "generate_cv" else COVER_LETTER_COST
         credit_mgr = CreditManager()
 
-        if not await credit_mgr.check_credits(self.user_id, cost, session=self._db_session):
-            current = await credit_mgr.get_credits(self.user_id, session=self._db_session)
-            return json.dumps(
-                {
-                    "error": (
-                        f"Crédits insuffisants. Vous avez {current} crédit(s), "
-                        f"il en faut {cost}. Activez les alertes emploi "
-                        "(gratuit) pour recevoir 50 crédits bonus !"
-                    )
-                }
-            )
-
         confirmed = args.get("confirmed", False)
         doc_type = "CV" if func_name == "generate_cv" else "lettre de motivation"
 
@@ -632,9 +620,20 @@ class Assistant:
                 if exc:
                     logger.error(
                         "[bg] Background task FAILED (%s, user=%s): %s",
-                        doc_type, self.user_id, exc, exc_info=exc,
+                        doc_type,
+                        self.user_id,
+                        exc,
+                        exc_info=exc,
                     )
 
+        # Déduire immédiatement, avant de lancer la tâche
+        deduct_result = await credit_mgr.deduct(
+            self.user_id, cost, reason=f"pre_{func_name}_{job.id}", session=self._db_session
+        )
+        if not deduct_result.success:
+            return json.dumps({"error": deduct_result.message})
+
+        # Seulement maintenant lancer la tâche (sans déduction dedans)
         task = asyncio.create_task(
             generate_document_background(
                 user_id=self.user_id,
@@ -643,6 +642,7 @@ class Assistant:
                 cost=cost,
                 platform=self.platform or "telegram",
                 chat_id=self.chat_id or self.user_id,
+                skip_deduction=True,
             )
         )
         task.add_done_callback(_log_task_exception)

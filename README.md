@@ -42,6 +42,14 @@ python -m leRH.adapters.telegram.bot
 cd adapters/whatsapp && npm install && npm run dev
 ```
 
+### ⚠️ Note sur SQLite et Multi-processus
+
+Bien que le README mentionne PostgreSQL pour la production, la configuration actuelle utilise **SQLite**. Pour éviter les erreurs `database is locked`, vous **devez** lancer l'API avec un seul worker :
+
+```bash
+uvicorn leRH.api.app:app --host 0.0.0.0 --port 8000 --workers 1
+```
+
 ## Développement
 
 Voir [AGENTS.md](./AGENTS.md) pour la méthodologie complète.

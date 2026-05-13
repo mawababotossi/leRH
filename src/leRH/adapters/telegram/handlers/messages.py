@@ -116,7 +116,7 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     tts_manager = context.bot_data.get("tts_manager")
 
     if translation_manager:
-        en_text = translation_manager.translate(transcription, "ewe_Latn", "eng_Latn")
+        en_text = await translation_manager.translate(transcription, "ewe_Latn", "eng_Latn")
     else:
         en_text = transcription
 
@@ -143,13 +143,13 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     reply_en = await assistant.interact(en_text)
 
     if translation_manager:
-        reply_ewe = translation_manager.translate(reply_en, "eng_Latn", "ewe_Latn")
+        reply_ewe = await translation_manager.translate(reply_en, "eng_Latn", "ewe_Latn")
         await context.bot.send_message(chat_id=chat_id, text=f"{reply_ewe}\n\n---\n\n{reply_en}")
     else:
         await context.bot.send_message(chat_id=chat_id, text=reply_en)
 
     if tts_manager and translation_manager:
-        tts_text = translation_manager.translate(reply_en, "eng_Latn", "ewe_Latn")
+        tts_text = await translation_manager.translate(reply_en, "eng_Latn", "ewe_Latn")
         audio_path = tts_manager.generate_audio(tts_text)
         with open(audio_path, "rb") as f:
             await context.bot.send_voice(chat_id=chat_id, voice=f)

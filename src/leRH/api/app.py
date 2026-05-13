@@ -5,9 +5,19 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from leRH.api.middleware.auth import verify_api_key
+from leRH.api.routers.applications import router as applications_router
+from leRH.api.routers.documents import router as documents_router
+from leRH.api.routers.health import router as health_router
+from leRH.api.routers.jobs import router as jobs_router
+from leRH.api.routers.matching import router as matching_router
+from leRH.api.routers.profiles import router as profiles_router
+from leRH.api.routers.subscriptions import router as subscriptions_router
+from leRH.api.routers.users import router as user_router
+from leRH.api.routers.whatsapp import router as whatsapp_router
 from leRH.db.base import Base, engine
 
 logger = logging.getLogger(__name__)
@@ -41,28 +51,25 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["http://localhost:3000", "http://localhost:5173"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-from leRH.api.routers.applications import router as applications_router  # noqa: E402
-from leRH.api.routers.documents import router as documents_router  # noqa: E402
-from leRH.api.routers.health import router as health_router  # noqa: E402
-from leRH.api.routers.jobs import router as jobs_router  # noqa: E402
-from leRH.api.routers.matching import router as matching_router  # noqa: E402
-from leRH.api.routers.profiles import router as profiles_router  # noqa: E402
-from leRH.api.routers.subscriptions import router as subscriptions_router  # noqa: E402
-from leRH.api.routers.users import router as user_router  # noqa: E402
-from leRH.api.routers.whatsapp import router as whatsapp_router  # noqa: E402
-
 app.include_router(health_router)
-app.include_router(user_router)
-app.include_router(whatsapp_router)
-app.include_router(matching_router)
-app.include_router(jobs_router)
-app.include_router(profiles_router)
-app.include_router(subscriptions_router)
-app.include_router(documents_router)
-app.include_router(applications_router)
+
+# Tous les autres routers nécessitent une clé API
+protected_routers = [
+    user_router,
+    whatsapp_router,
+    matching_router,
+    jobs_router,
+    profiles_router,
+    subscriptions_router,
+    documents_router,
+    applications_router,
+]
+
+for router in protected_routers:
+    app.include_router(router, dependencies=[Depends(verify_api_key)])

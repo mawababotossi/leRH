@@ -25,6 +25,7 @@ export async function apiRequest<T = unknown>(
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
     "User-Agent": "leRH-WhatsApp/0.1.0",
+    "X-API-Key": process.env.INTERNAL_API_KEY || "",
     ...(options.headers as Record<string, string>),
   };
 

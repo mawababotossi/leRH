@@ -22,6 +22,7 @@ async def generate_document_background(
     cost: int,
     platform: str,
     chat_id: str | int,
+    skip_deduction: bool = False,
 ) -> None:
     doc_type = "CV" if func_name == "generate_cv" else "lettre de motivation"
     logger.info("[bg] Début génération %s — user=%s job=%s", doc_type, user_id, job.title)
@@ -88,16 +89,19 @@ async def generate_document_background(
         relative_path = f"{user_id}/{filename}"
         logger.info("[bg] Fichier sauvegardé — %s (relative: %s)", filepath, relative_path)
 
-        # Deduct credits AFTER successful generation
-        credit_mgr = CreditManager()
-        result = await credit_mgr.deduct(
-            user_id, cost, reason=f"generation_{func_name}_for_{job.id}"
-        )
-        logger.info(
-            "[bg] Crédits déduits — remaining=%d success=%s",
-            result.credits_remaining,
-            result.success,
-        )
+        # Deduct credits AFTER successful generation (if not already deducted)
+        if not skip_deduction:
+            credit_mgr = CreditManager()
+            result = await credit_mgr.deduct(
+                user_id, cost, reason=f"generation_{func_name}_for_{job.id}"
+            )
+            logger.info(
+                "[bg] Crédits déduits — remaining=%d success=%s",
+                result.credits_remaining,
+                result.success,
+            )
+        else:
+            logger.info("[bg] Crédits déjà déduits par l'appelant")
 
         caption = (
             f"Votre {doc_type} est prêt ! 📎\n\n"

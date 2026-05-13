@@ -52,7 +52,7 @@ async def country(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         repo = UserRepository(session)
         user = await repo.get_by_telegram(tg_user.id)
         if user:
-            user.country = country_text
+            user.country = country_text[:255] if country_text else None
             user.conversation_state = "awaiting_activity"
             await session.commit()
             logger.info("User %s country set to %s", tg_user.id, country_text)
@@ -71,7 +71,7 @@ async def activity(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         repo = UserRepository(session)
         user = await repo.get_by_telegram(tg_user.id)
         if user:
-            user.activity = text
+            user.activity = text[:255] if text else None
             user.conversation_state = "awaiting_skills"
             await session.commit()
             logger.info("User %s activity set to %s", tg_user.id, text)
@@ -103,8 +103,8 @@ async def skip_activity(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
 
 async def skills(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     tg_user = update.message.from_user
-    text = update.message.text
-    skills_list = [s.strip() for s in text.split(",") if s.strip()]
+    text = update.message.text or ""
+    skills_list = [s.strip()[:100] for s in text.split(",") if s.strip()]
 
     async with async_session_factory() as session:
         repo = UserRepository(session)
@@ -149,7 +149,7 @@ async def diploma(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         repo = UserRepository(session)
         user = await repo.get_by_telegram(tg_user.id)
         if user:
-            user.diploma = text
+            user.diploma = text[:255] if text else None
             user.conversation_state = "ready"
             await session.commit()
             logger.info("User %s diploma set to %s", tg_user.id, text)

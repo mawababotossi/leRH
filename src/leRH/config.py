@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import ClassVar
 
+from pydantic import SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -14,7 +15,8 @@ class Settings(BaseSettings):
     )
 
     telegram_token: str = ""
-    openai_api_key: str = ""
+    openai_api_key: SecretStr = SecretStr("")
+    internal_api_key: SecretStr = SecretStr("")
     openai_base_url: str = "http://127.0.0.1:1337/v1"
     openai_timeout: int = 120
     llm_model_id: str = "mistralai/mistral-small-4-119b-2603"

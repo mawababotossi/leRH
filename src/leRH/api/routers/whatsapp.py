@@ -174,7 +174,7 @@ async def process_conversation(
                     )
                     await memory.add_message("assistant", retry)
                     return retry
-                user.name = name_candidate
+                user.name = name_candidate[:255]
                 user.conversation_state = "awaiting_country"
                 await db.flush()
                 country_q = COUNTRY_QUESTION.format(name=name_candidate)
@@ -182,14 +182,14 @@ async def process_conversation(
                 return country_q
 
             case "awaiting_country":
-                user.country = text.strip()
+                user.country = text.strip()[:255]
                 user.conversation_state = "awaiting_activity"
                 await db.flush()
                 await memory.add_message("assistant", ACTIVITY_QUESTION)
                 return ACTIVITY_QUESTION
 
             case "awaiting_activity":
-                user.activity = text.strip()
+                user.activity = text.strip()[:255]
                 user.conversation_state = "awaiting_skills"
                 await db.flush()
                 await memory.add_message("assistant", SKILLS_QUESTION)
@@ -198,7 +198,7 @@ async def process_conversation(
             case "awaiting_skills":
                 # On parse les compétences séparées par des virgules
                 raw_skills = text.strip()
-                skills_list = [s.strip() for s in raw_skills.split(",") if s.strip()]
+                skills_list = [s.strip()[:100] for s in raw_skills.split(",") if s.strip()]
                 user.skills = skills_list
                 user.conversation_state = "awaiting_diploma"
                 await db.flush()
@@ -206,7 +206,7 @@ async def process_conversation(
                 return DIPLOMA_QUESTION
 
             case "awaiting_diploma":
-                user.diploma = text.strip()
+                user.diploma = text.strip()[:255]
                 user.conversation_state = "ready"
                 await db.flush()
                 ready_msg = READY_MESSAGE.format(name=user.name or "")
@@ -347,7 +347,7 @@ async def whatsapp_voice(
         tl = TranslationManager()
         en_text = transcription
         with suppress(Exception):
-            en_text = tl.translate(transcription, "ewe_Latn", "eng_Latn")
+            en_text = await tl.translate(transcription, "ewe_Latn", "eng_Latn")
 
         history = await memory.build_context()
         local_jobs = await _get_local_jobs(db)
@@ -368,7 +368,7 @@ async def whatsapp_voice(
         )
         reply_en = await assistant.interact_with_history(en_text, history)
         try:
-            reply_ewe = tl.translate(reply_en, "eng_Latn", "ewe_Latn")
+            reply_ewe = await tl.translate(reply_en, "eng_Latn", "ewe_Latn")
             reply = f"{reply_ewe}\n\n---\n\n{reply_en}"
         except Exception:
             reply = reply_en
@@ -437,9 +437,7 @@ async def ack_pending_messages(
     if not payload.ids:
         return {"acked": 0}
 
-    result = await db.execute(
-        select(PendingMessage).where(PendingMessage.id.in_(payload.ids))
-    )
+    result = await db.execute(select(PendingMessage).where(PendingMessage.id.in_(payload.ids)))
     msgs = result.scalars().all()
     for msg in msgs:
         msg.sent = True
