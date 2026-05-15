@@ -43,7 +43,9 @@ def start_scheduler() -> None:
         misfire_grace_time=600,
     )
     scheduler.start()
-    logger.info("Batch scheduler started (daily at 02:00, cleanup at 03:00, hourly scrape 06:00-22:00)")
+    logger.info(
+        "Batch scheduler started (daily at 02:00, cleanup at 03:00, hourly scrape 06:00-22:00)"
+    )
 
 
 def stop_scheduler() -> None:

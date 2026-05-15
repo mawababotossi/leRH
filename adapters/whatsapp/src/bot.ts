@@ -449,7 +449,7 @@ async function pollPendingMessages(): Promise<void> {
         if (msg.message_type === "document" && msg.document_path) {
           // Charger le média (priorité local comme OpenClaw)
           const media = await loadMedia(msg.document_path);
-          const caption = msg.text || "Votre document est prêt ! 📎";
+          const caption = msg.text || "Ton document est prêt.";
 
           await sendMediaMessage(jid, media, caption);
           // ACK après envoi réussi — le message ne sera plus retourné par /pending
@@ -472,8 +472,8 @@ async function pollPendingMessages(): Promise<void> {
         // Prévenir l'utilisateur de l'echec
         try {
           const fallbackText =
-            "📎 Votre document a été généré mais l'envoi a échoué.\n" +
-            "Tapez 'mon cv' ou 'ma lettre' pour relancer l'envoi.\u200B";
+            "Ton document a été généré, mais l'envoi a échoué.\n\n" +
+            "Tape \"mon CV\" ou \"ma lettre\" pour relancer l'envoi.\u200B";
           await sock.sendMessage(jid, { text: fallbackText });
         } catch { /* ignore */ }
       }

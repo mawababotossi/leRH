@@ -68,10 +68,11 @@ async def update_job(
     return JobResponse.model_validate(job)
 
 
-@router.delete("/{job_id}", status_code=204)
-async def delete_job(job_id: str, db: AsyncSession = Depends(get_db)) -> None:
+@router.delete("/{job_id}", status_code=200)
+async def delete_job(job_id: str, db: AsyncSession = Depends(get_db)) -> dict:
     repo = JobRepository(db)
     job = await repo.get_by_id(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
     await repo.update(job, status="inactive")
+    return {"message": "Job deleted"}

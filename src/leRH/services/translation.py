@@ -15,7 +15,9 @@ class TranslationManager:
             name="Translator",
             activity="translation",
             search_enabled=False,
-            instructions=["You are a translator. Translate the user's message."],
+            instructions=[
+                "Tu es un traducteur. Traduis le message de l'utilisateur dans la langue demandée."
+            ],
         )
         return await assistant.interact(
             f"Translate this from {src_lang} to {tgt_lang}. "

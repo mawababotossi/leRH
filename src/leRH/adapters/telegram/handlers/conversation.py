@@ -6,6 +6,11 @@ from telegram import ReplyKeyboardMarkup, Update
 from telegram.ext import ContextTypes, ConversationHandler
 
 from leRH.config import settings
+from leRH.core.user_commands import (
+    build_notifications_text,
+    build_status_text,
+    onboarding_capabilities_text,
+)
 from leRH.db.base import async_session_factory
 from leRH.db.repository import UserRepository
 
@@ -58,7 +63,7 @@ async def country(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
             logger.info("User %s country set to %s", tg_user.id, country_text)
 
     await update.message.reply_text(
-        "Merci ! Quelle est votre activité ou profession ?\n" "(ou envoyez /skip pour passer)"
+        "Merci ! Quelle est votre activité ou profession ?\n(ou envoyez /skip pour passer)"
     )
     return settings.ACTIVITY
 
@@ -96,7 +101,7 @@ async def skip_activity(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
             await session.commit()
 
     await update.message.reply_text(
-        "Pas de souci. Quelles sont vos compétences principales ?\n" "Envoyez /skip pour passer."
+        "Pas de souci. Quelles sont vos compétences principales ?\nEnvoyez /skip pour passer."
     )
     return settings.SKILLS
 
@@ -156,11 +161,7 @@ async def diploma(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 
     await update.message.reply_text(
         f"Parfait *{first_name}* ! Votre profil est maintenant complet. 🎉\n\n"
-        f"Vous pouvez maintenant :\n"
-        f"• Envoyer votre *CV (PDF)* pour analyse\n"
-        f"• Chercher des offres d'emploi\n"
-        f"• Demander un CV ou une lettre de motivation\n\n"
-        f"Tapez /profil pour voir vos infos.",
+        f"{onboarding_capabilities_text()}",
         parse_mode="Markdown",
     )
     return ConversationHandler.END
@@ -179,8 +180,7 @@ async def skip_diploma(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
             await session.commit()
 
     await update.message.reply_text(
-        f"C'est noté *{first_name}* ! Votre profil est prêt. 🎉\n"
-        f"Tapez /profil pour voir vos infos ou posez-moi une question.",
+        f"C'est noté *{first_name}* !\n\n{onboarding_capabilities_text()}",
         parse_mode="Markdown",
     )
     return ConversationHandler.END
@@ -215,6 +215,41 @@ async def show_profile(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         f"💰 Crédits : {user.credits or 0}",
     ]
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+
+
+async def show_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Affiche le statut complet du compte Telegram."""
+    tg_user = update.message.from_user
+
+    async with async_session_factory() as session:
+        repo = UserRepository(session)
+        user = await repo.get_by_telegram(tg_user.id)
+        if not user:
+            await update.message.reply_text(
+                "Vous n'avez pas encore de profil. Tapez /start pour créer votre compte."
+            )
+            return
+        text = await build_status_text(session, user)
+
+    await update.message.reply_text(text)
+
+
+async def manage_notifications(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Active ou affiche les notifications emploi pour Telegram."""
+    tg_user = update.message.from_user
+
+    async with async_session_factory() as session:
+        repo = UserRepository(session)
+        user = await repo.get_by_telegram(tg_user.id)
+        if not user:
+            await update.message.reply_text(
+                "Vous n'avez pas encore de profil. Tapez /start pour créer votre compte."
+            )
+            return
+        text = await build_notifications_text(session, user, platform="telegram", activate=True)
+        await session.commit()
+
+    await update.message.reply_text(text)
 
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:

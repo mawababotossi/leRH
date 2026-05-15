@@ -4,8 +4,10 @@ import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from sqlalchemy import select, update
+
 from leRH.db.base import async_session_factory
-from leRH.db.models import User
+from leRH.db.models import CreditTransaction, User
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -15,8 +17,8 @@ logger = logging.getLogger(__name__)
 CV_COST = 5
 COVER_LETTER_COST = 3
 NOTIFICATION_COST = 1
-WELCOME_CREDITS = 10
-SUBSCRIPTION_BONUS = 50
+WELCOME_CREDITS = 20
+SUBSCRIPTION_BONUS = 7
 
 
 @dataclass
@@ -27,6 +29,30 @@ class CreditResult:
 
 
 class CreditManager:
+    @staticmethod
+    def _validate_amount(amount: int) -> None:
+        if amount <= 0:
+            raise ValueError("Credit amount must be positive")
+
+    async def _record_transaction(
+        self,
+        session: AsyncSession,
+        *,
+        user_id: str,
+        amount: int,
+        balance_after: int,
+        reason: str,
+    ) -> None:
+        session.add(
+            CreditTransaction(
+                user_id=user_id,
+                amount=amount,
+                balance_after=balance_after,
+                reason=reason[:255],
+            )
+        )
+        await session.flush()
+
     async def _get_user(self, user_id: str, session: AsyncSession | None = None) -> User | None:
         if session is not None:
             return await session.get(User, user_id)
@@ -54,12 +80,19 @@ class CreditManager:
         *,
         owned: bool = False,
     ) -> CreditResult:
-        user = await session.get(User, user_id)
-        if not user:
-            return CreditResult(False, 0, "Utilisateur non trouvé")
+        self._validate_amount(amount)
 
-        current = user.credits or 0
-        if current < amount:
+        result = await session.execute(
+            update(User)
+            .where(User.id == user_id, User.credits >= amount)
+            .values(credits=User.credits - amount)
+            .execution_options(synchronize_session="fetch")
+        )
+        if result.rowcount == 0:
+            current_result = await session.execute(select(User.credits).where(User.id == user_id))
+            current = current_result.scalar_one_or_none()
+            if current is None:
+                return CreditResult(False, 0, "Utilisateur non trouvé")
             return CreditResult(
                 False,
                 current,
@@ -67,7 +100,15 @@ class CreditManager:
                 f"Souscrivez à une offre pour en obtenir plus.",
             )
 
-        user.credits = current - amount
+        balance_result = await session.execute(select(User.credits).where(User.id == user_id))
+        balance = int(balance_result.scalar_one())
+        await self._record_transaction(
+            session,
+            user_id=user_id,
+            amount=-amount,
+            balance_after=balance,
+            reason=reason,
+        )
         await session.flush()
         if owned:
             await session.commit()
@@ -76,66 +117,18 @@ class CreditManager:
             user_id,
             amount,
             reason,
-            user.credits,
+            balance,
         )
-        return CreditResult(True, user.credits, f"Il vous reste {user.credits} crédits.")
+        return CreditResult(True, balance, f"Il vous reste {balance} crédits.")
 
     async def deduct(
         self, user_id: str, amount: int, reason: str = "", session: AsyncSession | None = None
     ) -> CreditResult:
-        from sqlalchemy import update
-        import asyncio
+        if session is not None:
+            return await self._deduct(session, user_id, amount, reason, owned=False)
 
-        max_retries = 10
-        for attempt in range(max_retries):
-            try:
-                if session is not None:
-                    result = await session.execute(
-                        update(User)
-                        .where(User.id == user_id, User.credits >= amount)
-                        .values(credits=User.credits - amount)
-                        .returning(User.credits)
-                    )
-                    row = result.fetchone()
-                    if row is None:
-                        user = await session.get(User, user_id)
-                        current = user.credits if user else 0
-                        return CreditResult(
-                            False,
-                            current,
-                            f"Crédits insuffisants ({current}/{amount}).",
-                        )
-                    logger.info("Credits deducted: user=%s amount=%d reason=%s", user_id, amount, reason)
-                    return CreditResult(True, row[0], f"Il vous reste {row[0]} crédits.")
-
-                async with async_session_factory() as s:
-                    result = await s.execute(
-                        update(User)
-                        .where(User.id == user_id, User.credits >= amount)
-                        .values(credits=User.credits - amount)
-                        .returning(User.credits)
-                    )
-                    row = result.fetchone()
-                    await s.commit()
-                    if row is None:
-                        user = await s.get(User, user_id)
-                        current = user.credits if user else 0
-                        return CreditResult(False, current, f"Crédits insuffisants ({current}/{amount}).")
-                    logger.info("Credits deducted: user=%s amount=%d reason=%s", user_id, amount, reason)
-                    return CreditResult(True, row[0], f"Il vous reste {row[0]} crédits.")
-            except Exception as e:
-                err_msg = str(e).lower()
-                if attempt < max_retries - 1 and ("database is locked" in err_msg or "busy" in err_msg):
-                    wait = (attempt + 1) * 0.1
-                    logger.warning(
-                        "Credit deduction DB locked, retry in %.1fs (attempt %d/%d)", 
-                        wait, attempt + 1, max_retries
-                    )
-                    await asyncio.sleep(wait)
-                else:
-                    logger.error("Credit deduction failed: %s", e)
-                    raise
-        return CreditResult(False, 0, "Erreur technique lors de la déduction de crédits")
+        async with async_session_factory() as s:
+            return await self._deduct(s, user_id, amount, reason, owned=True)
 
     async def _add(
         self,
@@ -146,11 +139,26 @@ class CreditManager:
         *,
         owned: bool = False,
     ) -> CreditResult:
-        user = await session.get(User, user_id)
-        if not user:
+        self._validate_amount(amount)
+
+        result = await session.execute(
+            update(User)
+            .where(User.id == user_id)
+            .values(credits=User.credits + amount)
+            .execution_options(synchronize_session="fetch")
+        )
+        if result.rowcount == 0:
             return CreditResult(False, 0, "Utilisateur non trouvé")
 
-        user.credits = (user.credits or 0) + amount
+        balance_result = await session.execute(select(User.credits).where(User.id == user_id))
+        balance = int(balance_result.scalar_one())
+        await self._record_transaction(
+            session,
+            user_id=user_id,
+            amount=amount,
+            balance_after=balance,
+            reason=reason,
+        )
         await session.flush()
         if owned:
             await session.commit()
@@ -159,9 +167,9 @@ class CreditManager:
             user_id,
             amount,
             reason,
-            user.credits,
+            balance,
         )
-        return CreditResult(True, user.credits, f"Vous avez {user.credits} crédits.")
+        return CreditResult(True, balance, f"Vous avez {balance} crédits.")
 
     async def add(
         self, user_id: str, amount: int, reason: str = "", session: AsyncSession | None = None

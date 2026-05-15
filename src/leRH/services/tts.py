@@ -21,7 +21,7 @@ class TTSManager:
             raise ValueError("Text cannot be empty")
 
         headers = {
-            "Authorization": f"Bearer {settings.openai_api_key}",
+            "Authorization": f"Bearer {settings.openai_api_key.get_secret_value()}",
             "Content-Type": "application/json",
         }
         payload = {

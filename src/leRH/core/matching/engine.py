@@ -36,47 +36,66 @@ class MatchResult:
 
 
 MATCH_SYSTEM_PROMPT = (
-    "You are a recruitment matching AI. Analyze the compatibility "
-    "between a candidate profile and a job offer. Be objective and thorough."
+    "Tu es un expert en matching recrutement pour le marché ouest-africain. "
+    "Analyse objectivement la compatibilité entre un profil candidat et une offre d'emploi. "
+    "Sois précis et justifie chaque note avec des éléments concrets du profil et de l'offre. "
+    "N'invente JAMAIS des compétences, diplômes ou expériences que le candidat ne possède pas. "
+    "Si une information est insuffisante pour noter un critère, attribue un score bas (0-20) avec la mention 'information insuffisante'."
 )
 
-MATCH_USER_PROMPT = """Analyze the match between this candidate and job offer.
+MATCH_USER_PROMPT = """Analyse la compatibilité entre ce candidat et cette offre d'emploi.
 
-CANDIDATE:
-Name: {name}
-Country: {country}
-City: {city}
-Activity: {activity}
-Diploma: {diploma}
-Experience: {experience}
-Skills: {skills}
-Languages: {languages}
-CV Analysis: {cv_analysis}
+CANDIDAT :
+Nom : {name}
+Pays : {country}
+Ville : {city}
+Métier : {activity}
+Diplôme : {diploma}
+Expérience : {experience}
+Compétences : {skills}
+Langues : {languages}
+Analyse CV : {cv_analysis}
 
-JOB OFFER:
-Title: {title}
-Company: {company}
-City: {city_job}
-Description: {description}
-Requirements: {requirements}
-Salary: {salary_min} - {salary_max}
-Source: {source}
-Source URL: {source_url}
+OFFRE D'EMPLOI :
+Titre : {title}
+Entreprise : {company}
+Ville : {city_job}
+Description : {description}
+Prérequis : {requirements}
+Salaire : {salary_min} - {salary_max}
+Source : {source}
+URL : {source_url}
 
-Score each criterion 0-100:
-- skills (weight 0.30): technical and soft skills match
-- experience (weight 0.30): relevant work experience
-- education (weight 0.15): diploma and training adequacy
-- location (weight 0.10): geographic compatibility
-- overall (weight 0.15): holistic assessment
+Grille de notation (chaque critère de 0 à 100) :
+- compétences (poids 0.30) : correspondance technique et savoir-être
+- expérience (poids 0.30) : pertinence du parcours professionnel
+- formation (poids 0.15) : adéquation du diplôme et des certifications
+- localisation (poids 0.10) : compatibilité géographique
+- global (poids 0.15) : évaluation holistique
 
-Respond ONLY with a valid JSON object, no other text:
+Échelle de notation :
+- 0-20 : ne correspond pas du tout
+- 21-40 : correspondance faible
+- 41-60 : correspondance moyenne
+- 61-80 : bonne correspondance
+- 81-100 : correspondance excellente
+
+Exemple de bonne notation :
 {{"criteria": [
-    {{"name": "skills", "score": 0, "weight": 0.30, "details": "..."}},
-    {{"name": "experience", "score": 0, "weight": 0.30, "details": "..."}},
-    {{"name": "education", "score": 0, "weight": 0.15, "details": "..."}},
-    {{"name": "location", "score": 0, "weight": 0.10, "details": "..."}},
-    {{"name": "overall", "score": 0, "weight": 0.15, "details": "..."}}
+    {{"name": "compétences", "score": 75, "weight": 0.30, "details": "Le candidat maîtrise Python et Django tel que requis, mais n'a pas d'expérience en DevOps"}},
+    {{"name": "expérience", "score": 60, "weight": 0.30, "details": "5 ans en développement web dont 2 dans le secteur bancaire, correspondant au besoin"}},
+    {{"name": "formation", "score": 80, "weight": 0.15, "details": "Master en informatique requis, le candidat est titulaire d'un BAC+5"}},
+    {{"name": "localisation", "score": 100, "weight": 0.10, "details": "Candidat basé à Lomé, poste à Lomé"}},
+    {{"name": "global", "score": 70, "weight": 0.15, "details": "Profil solide, léger déficit sur les compétences DevOps"}}
+], "summary": "Bon profil technique correspondant à 70% des exigences. À rencontrer pour entretien.", "recommendation": "strong_match"}}
+
+Réponds UNIQUEMENT avec ce JSON valide (aucun texte avant ni après) :
+{{"criteria": [
+    {{"name": "compétences", "score": 0, "weight": 0.30, "details": "..."}},
+    {{"name": "expérience", "score": 0, "weight": 0.30, "details": "..."}},
+    {{"name": "formation", "score": 0, "weight": 0.15, "details": "..."}},
+    {{"name": "localisation", "score": 0, "weight": 0.10, "details": "..."}},
+    {{"name": "global", "score": 0, "weight": 0.15, "details": "..."}}
 ], "summary": "...", "recommendation": "strong_match|possible_match|weak_match"}}"""
 
 
@@ -91,7 +110,7 @@ def _json_dumps(obj: object) -> str:
 class Matcher:
     def __init__(self) -> None:
         self._client = OpenAI(
-            api_key=settings.openai_api_key,
+            api_key=settings.openai_api_key.get_secret_value(),
             base_url=settings.openai_base_url,
             timeout=settings.openai_timeout,
         )
@@ -145,7 +164,7 @@ class Matcher:
                     {"role": "system", "content": MATCH_SYSTEM_PROMPT},
                     {"role": "user", "content": prompt},
                 ],
-                temperature=0.1,
+                temperature=0.1,  # Basse pour reproductibilité du scoring, 0.3 max pour variété dans les justifications
                 max_tokens=1024,
             )
             content = response.choices[0].message.content or ""

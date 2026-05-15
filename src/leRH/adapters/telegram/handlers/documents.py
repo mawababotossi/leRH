@@ -63,7 +63,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 await cv_repo.create(
                     user_id=user.id,
                     original_name=doc.file_name or "cv.pdf",
-                    extracted_text=cv_text[:5000],
+                    extracted_text=cv_text,
                     analysis=result or {"analysis": "Extraction failed"},
                 )
 

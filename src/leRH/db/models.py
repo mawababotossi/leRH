@@ -3,8 +3,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, Float, ForeignKey, String, Text, func
-from sqlalchemy.dialects.sqlite import JSON
+from sqlalchemy import JSON, Boolean, DateTime, Float, ForeignKey, Integer, String, Text, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from leRH.db.base import Base
@@ -19,7 +18,7 @@ class User(Base):
 
     id: Mapped[str] = mapped_column(String(12), primary_key=True, default=_uuid)
     telegram_id: Mapped[int | None] = mapped_column(unique=True, nullable=True)
-    whatsapp_id: Mapped[str | None] = mapped_column(unique=True, nullable=True)
+    whatsapp_id: Mapped[str | None] = mapped_column(String(255), unique=True, nullable=True)
 
     name: Mapped[str] = mapped_column(String(255), default="")
     country: Mapped[str] = mapped_column(String(100), default="Togo")
@@ -32,7 +31,7 @@ class User(Base):
     languages: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     availability: Mapped[str | None] = mapped_column(String(50), nullable=True)
     verified: Mapped[bool] = mapped_column(default=False)
-    credits: Mapped[int] = mapped_column(default=10)
+    credits: Mapped[int] = mapped_column(default=20)
 
     # Liens sociaux (Amélioration C)
     linkedin_url: Mapped[str | None] = mapped_column(String(255), nullable=True)
@@ -60,6 +59,12 @@ class User(Base):
         back_populates="candidate", cascade="all, delete-orphan"
     )
     messages: Mapped[list[Message]] = relationship(
+        back_populates="user", cascade="all, delete-orphan"
+    )
+    credit_transactions: Mapped[list[CreditTransaction]] = relationship(
+        back_populates="user", cascade="all, delete-orphan"
+    )
+    document_jobs: Mapped[list[DocumentJob]] = relationship(
         back_populates="user", cascade="all, delete-orphan"
     )
 
@@ -223,6 +228,44 @@ class RateLimitEntry(Base):
 
     key: Mapped[str] = mapped_column(String(255), primary_key=True)
     timestamp: Mapped[datetime] = mapped_column(DateTime, primary_key=True, default=func.now())
+
+
+class CreditTransaction(Base):
+    __tablename__ = "credit_transactions"
+
+    id: Mapped[str] = mapped_column(String(12), primary_key=True, default=_uuid)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"))
+    amount: Mapped[int] = mapped_column(Integer)
+    balance_after: Mapped[int] = mapped_column(Integer)
+    reason: Mapped[str] = mapped_column(String(255), default="")
+
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+    user: Mapped[User] = relationship(back_populates="credit_transactions")
+
+
+class DocumentJob(Base):
+    __tablename__ = "document_jobs"
+
+    id: Mapped[str] = mapped_column(String(12), primary_key=True, default=_uuid)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"))
+    job_id: Mapped[str | None] = mapped_column(ForeignKey("jobs.id"), nullable=True)
+    document_type: Mapped[str] = mapped_column(String(30))
+    status: Mapped[str] = mapped_column(String(20), default="pending")
+    platform: Mapped[str] = mapped_column(String(20), default="telegram")
+    chat_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    file_path: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    target_profile: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now(), onupdate=func.now()
+    )
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+    user: Mapped[User] = relationship(back_populates="document_jobs")
+    job: Mapped[Job | None] = relationship()
 
 
 class OnboardingSession(Base):

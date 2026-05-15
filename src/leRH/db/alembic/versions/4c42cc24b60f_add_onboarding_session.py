@@ -4,16 +4,13 @@ Revision ID: 4c42cc24b60f
 Revises: fda55c0e2ced
 Create Date: 2026-05-13 07:33:37.921568
 """
-from typing import Sequence, Union
 
-from alembic import op
-import sqlalchemy as sa
+from collections.abc import Sequence
 
-
-revision: str = '4c42cc24b60f'
-down_revision: Union[str, None] = 'fda55c0e2ced'
-branch_labels: Union[str, Sequence[str], None] = None
-depends_on: Union[str, Sequence[str], None] = None
+revision: str = "4c42cc24b60f"
+down_revision: str | None = "fda55c0e2ced"
+branch_labels: str | Sequence[str] | None = None
+depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:

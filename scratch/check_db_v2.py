@@ -1,6 +1,4 @@
-
 import sqlite3
-import json
 
 db_path = "data/lerh.db"
 conn = sqlite3.connect(db_path)
@@ -27,9 +25,9 @@ for cv in cvs:
     c = dict(cv)
     print(f"CV ID: {c['id']}, Job ID: {c['job_id']}, Type: {c['cv_type']}, File: {c['file_path']}")
 
-print(f"\n--- Jobs mentioned ---")
+print("\n--- Jobs mentioned ---")
 for cv in cvs:
-    job_id = cv['job_id']
+    job_id = cv["job_id"]
     if job_id:
         job = cursor.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
         if job:

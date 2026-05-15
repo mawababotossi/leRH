@@ -3,7 +3,6 @@ from __future__ import annotations
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from pathlib import Path
 
 from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -38,23 +37,25 @@ handler.setFormatter(
 logging.basicConfig(level=logging.INFO, handlers=[handler])
 logger = logging.getLogger(__name__)
 
-DATA_DIR = Path(__file__).resolve().parent.parent.parent.parent / "data"
-
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
-    logger.info("Starting leRH API")
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    async with engine.connect() as conn:
-        await conn.exec_driver_sql("PRAGMA journal_mode=WAL")
+    logger.info(
+        "Starting leRH API (auto_create_tables=%s, enable_scheduler=%s)",
+        settings.auto_create_tables,
+        settings.enable_scheduler,
+    )
+    if settings.auto_create_tables:
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
 
     from leRH.core.batch.scheduler import start_scheduler, stop_scheduler
 
-    start_scheduler()
+    if settings.enable_scheduler:
+        start_scheduler()
     yield
-    stop_scheduler()
+    if settings.enable_scheduler:
+        stop_scheduler()
     await engine.dispose()
     logger.info("Shutting down leRH API")
 

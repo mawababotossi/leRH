@@ -4,11 +4,11 @@ from logging.config import fileConfig
 from alembic import context
 from sqlalchemy.ext.asyncio import create_async_engine
 
+import leRH.db.models  # noqa: F401
 from leRH.config import settings
 from leRH.db.base import Base
 
 # Import all models so they are registered on Base.metadata
-from leRH.db.models import User, CV, Experience, Education, Job, Application, Subscription, Message, PendingMessage
 
 config = context.config
 if config.config_file_name is not None:
@@ -18,18 +18,14 @@ target_metadata = Base.metadata
 
 
 def run_migrations_offline() -> None:
-    url = config.get_main_option("sqlalchemy.url")
-    context.configure(
-        url=url, target_metadata=target_metadata, literal_binds=True, render_as_batch=True
-    )
+    url = settings.database_url
+    context.configure(url=url, target_metadata=target_metadata, literal_binds=True)
     with context.begin_transaction():
         context.run_migrations()
 
 
 def do_run_migrations(connection):
-    context.configure(
-        connection=connection, target_metadata=target_metadata, render_as_batch=True
-    )
+    context.configure(connection=connection, target_metadata=target_metadata)
     with context.begin_transaction():
         context.run_migrations()
 

@@ -3,13 +3,15 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import random
+import re
 from datetime import datetime
 from typing import TYPE_CHECKING
 
 from openai import APIError, APITimeoutError, OpenAI
 
 from leRH.config import settings
-from leRH.core.assistants.persona import BEHAVIOR_INSTRUCTIONS, SYSTEM_PROMPT
+from leRH.core.assistants.persona import BEHAVIOR_INSTRUCTIONS, MARKET_DATA, SYSTEM_PROMPT
 from leRH.core.batch.document_tasks import generate_document_background
 from leRH.core.credits import (
     COVER_LETTER_COST,
@@ -30,6 +32,8 @@ logger = logging.getLogger(__name__)
 DEFAULT_INSTRUCTIONS = BEHAVIOR_INSTRUCTIONS
 
 MAX_TOOL_TURNS = 4
+MAX_JOB_RESULTS_FOR_CHAT = 5
+_ACTIVE_DOCUMENT_TASKS: set[tuple[str, str, str]] = set()
 
 
 class Assistant:
@@ -83,6 +87,15 @@ class Assistant:
         """
         parts = [SYSTEM_PROMPT]
 
+        # --- Données marché (allègent le prompt principal) ---
+        if hasattr(self, "country") and self.country in (
+            "Togo",
+            "Bénin",
+            "Côte d'Ivoire",
+            "Sénégal",
+        ):
+            parts.append(MARKET_DATA)
+
         # --- Instructions comportementales ---
         for instruction in self.instructions:
             parts.append(instruction)
@@ -125,6 +138,38 @@ class Assistant:
             messages.extend(history)
         messages.append({"role": "user", "content": user_input})
         return messages
+
+    @staticmethod
+    def _plain_whatsapp_links(text: str) -> str:
+        """Convertit les liens Markdown en URLs brutes compatibles WhatsApp."""
+        return re.sub(r"\[([^\]]+)\]\((https?://[^)\s]+)\)", r"\2", text)
+
+    @staticmethod
+    def _remove_unbalanced_marker(text: str, marker: str) -> str:
+        lines = []
+        for line in text.splitlines():
+            marker_count = line.count(marker)
+            if marker_count % 2 or marker_count > 2:
+                line = line.replace(marker, "")
+            lines.append(line)
+        return "\n".join(lines)
+
+    @classmethod
+    def _whatsapp_safe_format(cls, text: str) -> str:
+        """Garde le formatage WhatsApp sûr et supprime le Markdown web."""
+        text = cls._plain_whatsapp_links(text)
+        text = re.sub(r"(?m)^#{1,6}\s*", "", text)
+        text = re.sub(r"\*\*([^*\n]+)\*\*", r"*\1*", text)
+        text = re.sub(r"__([^_\n]+)__", r"_\1_", text)
+        text = text.replace("`", "")
+        for marker in ("*", "_", "~"):
+            text = cls._remove_unbalanced_marker(text, marker)
+        return text
+
+    def _format_response_for_platform(self, text: str) -> str:
+        if self.platform == "whatsapp":
+            return self._whatsapp_safe_format(text)
+        return text
 
     def _build_tools(self) -> list[dict]:
         tools = []
@@ -170,6 +215,30 @@ class Assistant:
                                     },
                                 },
                                 "required": ["keywords"],
+                            },
+                        },
+                    }
+                )
+
+                base.append(
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "get_job_details",
+                            "description": (
+                                "Retourne les détails complets d'une offre locale par son ID,"
+                                " dont le lien source si disponible. Utilise cet outil quand"
+                                " l'utilisateur demande les détails, le lien ou comment postuler."
+                            ),
+                            "parameters": {
+                                "type": "object",
+                                "properties": {
+                                    "job_id": {
+                                        "type": "string",
+                                        "description": "ID exact de l'offre retourné par search_local_jobs.",
+                                    },
+                                },
+                                "required": ["job_id"],
                             },
                         },
                     }
@@ -229,6 +298,37 @@ class Assistant:
                                     " de son profil sont correctes pour la generation."
                                 ),
                             },
+                            "beneficiary_type": {
+                                "type": "string",
+                                "enum": ["user", "other"],
+                                "description": (
+                                    "'user' si le document est pour l'utilisateur connecté,"
+                                    " 'other' si c'est pour un cousin/ami/frère/autre personne."
+                                ),
+                            },
+                            "target_profile": {
+                                "type": "object",
+                                "description": (
+                                    "Mini-profil obligatoire si beneficiary_type='other'."
+                                    " Contient au minimum name, activity, skills et experience."
+                                ),
+                                "properties": {
+                                    "name": {"type": "string"},
+                                    "activity": {"type": "string"},
+                                    "skills": {
+                                        "type": "array",
+                                        "items": {"type": "string"},
+                                    },
+                                    "experience": {"type": "string"},
+                                    "diploma": {"type": "string"},
+                                    "languages": {
+                                        "type": "array",
+                                        "items": {"type": "string"},
+                                    },
+                                    "phone": {"type": "string"},
+                                    "email": {"type": "string"},
+                                },
+                            },
                         },
                         "required": ["job_id"],
                     },
@@ -263,6 +363,37 @@ class Assistant:
                                     "Indique si l'utilisateur a confirme que les informations"
                                     " de son profil sont correctes pour la generation."
                                 ),
+                            },
+                            "beneficiary_type": {
+                                "type": "string",
+                                "enum": ["user", "other"],
+                                "description": (
+                                    "'user' si le document est pour l'utilisateur connecté,"
+                                    " 'other' si c'est pour un cousin/ami/frère/autre personne."
+                                ),
+                            },
+                            "target_profile": {
+                                "type": "object",
+                                "description": (
+                                    "Mini-profil obligatoire si beneficiary_type='other'."
+                                    " Contient au minimum name, activity, skills et experience."
+                                ),
+                                "properties": {
+                                    "name": {"type": "string"},
+                                    "activity": {"type": "string"},
+                                    "skills": {
+                                        "type": "array",
+                                        "items": {"type": "string"},
+                                    },
+                                    "experience": {"type": "string"},
+                                    "diploma": {"type": "string"},
+                                    "languages": {
+                                        "type": "array",
+                                        "items": {"type": "string"},
+                                    },
+                                    "phone": {"type": "string"},
+                                    "email": {"type": "string"},
+                                },
                             },
                         },
                         "required": ["job_id"],
@@ -301,7 +432,7 @@ class Assistant:
                         "Abonne l'utilisateur aux alertes emploi quotidiennes."
                         " Il recevra automatiquement les nouvelles offres"
                         " correspondant a son profil chaque jour."
-                        " Cout: gratuit, donne 50 credits bonus."
+                        f" Cout: gratuit, donne {SUBSCRIPTION_BONUS} credits bonus."
                     ),
                     "parameters": {
                         "type": "object",
@@ -329,7 +460,7 @@ class Assistant:
                     "description": (
                         "Met a jour les informations du profil de l'utilisateur."
                         " Utilise cette fonction quand l'utilisateur souhaite modifier"
-                        " son nom, pays, activite, competences ou diplome."
+                        " son nom, pays, activite, competences, diplome ou resume."
                     ),
                     "parameters": {
                         "type": "object",
@@ -346,6 +477,14 @@ class Assistant:
                                 "description": "Liste des competences",
                             },
                             "diploma": {"type": "string", "description": "Nouveau diplome"},
+                            "summary_override": {
+                                "type": "string",
+                                "description": (
+                                    "Resume professionnel personnalise qui sera utilise"
+                                    " prioritairement dans tous les CV et lettres generes."
+                                    " Doit faire 3-5 phrases."
+                                ),
+                            },
                         },
                         "required": [],
                     },
@@ -426,7 +565,9 @@ class Assistant:
         }
     )
 
-    def _search_local_jobs(self, query: str, max_results: int = 10) -> list[Job]:
+    def _search_local_jobs(
+        self, query: str, max_results: int = MAX_JOB_RESULTS_FOR_CHAT
+    ) -> list[Job]:
         words = [w for w in query.lower().split() if len(w) > 2 and w not in self._STOP_WORDS]
         if not words:
             return self._search_with_skills(max_results)
@@ -439,13 +580,14 @@ class Assistant:
                 matches.append(job)
         if not matches:
             return self._search_with_skills(max_results)
+        random.shuffle(matches)
         matches.sort(
             key=lambda j: sum(1 for w in words if w in f"{j.title} {j.description}".lower()),
             reverse=True,
         )
         return matches[:max_results]
 
-    def _search_with_skills(self, max_results: int = 10) -> list[Job]:
+    def _search_with_skills(self, max_results: int = MAX_JOB_RESULTS_FOR_CHAT) -> list[Job]:
         if not self.skills:
             return []
         words = [s.lower() for s in self.skills if len(s) > 2]
@@ -460,26 +602,115 @@ class Assistant:
                 matches.append(job)
         if not matches:
             return []
+        random.shuffle(matches)
         matches.sort(
             key=lambda j: sum(1 for w in words if w in f"{j.title} {j.description}".lower()),
             reverse=True,
         )
         return matches[:max_results]
 
+    @staticmethod
+    def _job_requirements_summary(job: Job) -> dict:
+        return job.requirements if isinstance(job.requirements, dict) else {}
+
+    @classmethod
+    def _job_payload(cls, job: Job, *, detailed: bool = False) -> dict:
+        requirements = cls._job_requirements_summary(job)
+        payload = {
+            "id": job.id,
+            "title": job.title,
+            "company": job.company or "",
+            "city": job.city or "",
+            "description": job.description or "",
+            "source_url": job.source_url or "",
+            "url": job.source_url or "",
+            "source_name": job.source_name or "",
+            "contract_type": requirements.get("Type de contrat")
+            or requirements.get("contract_type")
+            or "",
+            "salary": requirements.get("Salaire proposé") or "",
+            "experience_level": requirements.get("Niveau d'expérience")
+            or requirements.get("experience_level")
+            or "",
+            "education_level": requirements.get("Niveau d'études")
+            or requirements.get("diploma_required")
+            or "",
+            "skills": requirements.get("skills") or [],
+        }
+        if detailed:
+            payload["requirements"] = requirements
+        else:
+            payload["description"] = payload["description"][:700]
+        return payload
+
+    async def _get_job(self, job_id: str) -> Job | None:
+        for job in self.local_jobs:
+            if job.id == job_id:
+                return job
+
+        if not self._db_session:
+            return None
+
+        from leRH.db.repository import JobRepository
+
+        repo = JobRepository(self._db_session)
+        return await repo.get_by_id(job_id)
+
+    @staticmethod
+    def _normalize_target_profile(raw: dict | None) -> dict:
+        if not isinstance(raw, dict):
+            return {}
+
+        skills = raw.get("skills") or []
+        if isinstance(skills, str):
+            skills = [s.strip() for s in skills.split(",") if s.strip()]
+        elif not isinstance(skills, list):
+            skills = []
+
+        languages = raw.get("languages") or []
+        if isinstance(languages, str):
+            languages = [s.strip() for s in languages.split(",") if s.strip()]
+        elif not isinstance(languages, list):
+            languages = []
+
+        return {
+            "name": str(raw.get("name") or "").strip(),
+            "activity": str(raw.get("activity") or "").strip(),
+            "skills": [str(skill).strip() for skill in skills if str(skill).strip()],
+            "experience": str(raw.get("experience") or "").strip(),
+            "diploma": str(raw.get("diploma") or "").strip(),
+            "languages": [str(lang).strip() for lang in languages if str(lang).strip()],
+            "phone": str(raw.get("phone") or "").strip(),
+            "email": str(raw.get("email") or "").strip(),
+        }
+
+    @staticmethod
+    def _missing_target_profile_fields(profile: dict) -> list[str]:
+        missing = []
+        if not profile.get("name"):
+            missing.append("nom/prénom")
+        if not profile.get("activity"):
+            missing.append("métier visé")
+        if not profile.get("skills"):
+            missing.append("compétences")
+        if not profile.get("experience"):
+            missing.append("expérience")
+        return missing
+
     def _find_job_by_title(self, title_query: str, min_score: float = 70.0) -> Job | None:
         """Trouve une offre par titre avec score minimum.
-        
+
         Args:
             title_query: Titre ou description recherchée.
             min_score: Score minimum requis (0-100). Défaut: 70%.
-            
+
         Returns:
             L'offre correspondante si le score >= min_score, sinon None.
         """
         words = [w for w in title_query.lower().split() if len(w) > 2]
         if not words:
             return None
-            
+
         best_score = 0
         best_job = None
         for job in self.local_jobs:
@@ -490,12 +721,18 @@ class Assistant:
                 if score > best_score:
                     best_score = score
                     best_job = job
-        
+
         if best_score >= min_score:
-            logger.info("[JobMatch] Offre sélectionnée: '%s' (score: %.1f%%)", best_job.title, best_score)
+            logger.info(
+                "[JobMatch] Offre sélectionnée: '%s' (score: %.1f%%)", best_job.title, best_score
+            )
             return best_job
-            
-        logger.info("[JobMatch] Aucune offre avec score suffisant (meilleur: %.1f%% < %d%%)", best_score, min_score)
+
+        logger.info(
+            "[JobMatch] Aucune offre avec score suffisant (meilleur: %.1f%% < %d%%)",
+            best_score,
+            min_score,
+        )
         return None
 
     async def _handle_tool_call(self, tool_call) -> str:
@@ -513,38 +750,39 @@ class Assistant:
                 query += f" {city}"
             jobs = self._search_local_jobs(query)
             return json.dumps(
-                [
-                    {
-                        "id": j.id,
-                        "title": j.title,
-                        "company": j.company or "",
-                        "city": j.city or "",
-                        "description": (j.description[:300] if j.description else ""),
-                        "url": j.source_url or "",
-                    }
-                    for j in jobs
-                ],
+                [self._job_payload(j) for j in jobs],
                 ensure_ascii=False,
             )
+
+        if func_name == "get_job_details":
+            job_id = args.get("job_id", "")
+            job = await self._get_job(job_id)
+            if not job:
+                return json.dumps(
+                    {"error": f"Offre introuvable pour l'ID « {job_id} »."},
+                    ensure_ascii=False,
+                )
+            return json.dumps(self._job_payload(job, detailed=True), ensure_ascii=False)
 
         if func_name == "search_web_jobs":
             query = args.get("query", "")
             results = search_jobs_online(query) if query else []
-            
+
             persisted_jobs = []
             if results and self._db_session:
                 from leRH.db.repository import JobRepository
+
                 repo = JobRepository(self._db_session)
-                for r in results:
+                for r in results[:MAX_JOB_RESULTS_FOR_CHAT]:
                     job = await repo.upsert_external_job(
                         title=r.title,
                         description=r.snippet,
                         source_url=r.url,
                         is_external=True,
-                        status="active"
+                        status="active",
                     )
                     persisted_jobs.append(job)
-            
+
             return json.dumps(
                 [
                     {
@@ -559,7 +797,7 @@ class Assistant:
             )
 
         if func_name == "check_document_status":
-            return self._handle_check_document_tool()
+            return await self._handle_check_document_tool()
 
         if func_name == "generate_cv" or func_name == "generate_cover_letter":
             return await self._handle_document_tool(func_name, args)
@@ -572,14 +810,22 @@ class Assistant:
 
         return json.dumps({"error": f"Unknown tool: {func_name}"})
 
-    def _handle_check_document_tool(self) -> str:
+    async def _handle_check_document_tool(self) -> str:
         if not self.user_id:
             return json.dumps({"error": "Impossible d'identifier l'utilisateur."})
         from leRH.core.documents.generator import GENERATED_DIR
 
+        document_jobs = await self._get_recent_document_jobs()
         user_dir = GENERATED_DIR / self.user_id
         if not user_dir.is_dir():
-            return json.dumps({"generated": [], "message": "Aucun document genere pour l'instant."})
+            return json.dumps(
+                {
+                    "jobs": document_jobs,
+                    "generated": [],
+                    "message": "Aucun document genere pour l'instant.",
+                },
+                ensure_ascii=False,
+            )
         files = sorted(user_dir.iterdir(), key=lambda f: f.stat().st_mtime, reverse=True)
         docs = [
             {
@@ -591,7 +837,42 @@ class Assistant:
             }
             for f in files
         ]
-        return json.dumps({"generated": docs}, ensure_ascii=False)
+        return json.dumps({"jobs": document_jobs, "generated": docs}, ensure_ascii=False)
+
+    async def _get_recent_document_jobs(self) -> list[dict]:
+        if not self.user_id:
+            return []
+
+        from sqlalchemy import select
+
+        from leRH.db.models import DocumentJob
+
+        async def _fetch(session: AsyncSession) -> list[dict]:
+            result = await session.execute(
+                select(DocumentJob)
+                .where(DocumentJob.user_id == self.user_id)
+                .order_by(DocumentJob.created_at.desc())
+                .limit(10)
+            )
+            jobs = result.scalars().all()
+            return [
+                {
+                    "id": job.id,
+                    "document_type": job.document_type,
+                    "status": job.status,
+                    "file_path": job.file_path,
+                    "error": job.error,
+                    "created_at": job.created_at.isoformat() if job.created_at else None,
+                    "completed_at": job.completed_at.isoformat() if job.completed_at else None,
+                }
+                for job in jobs
+            ]
+
+        if self._db_session is not None:
+            return await _fetch(self._db_session)
+
+        async with async_session_factory() as session:
+            return await _fetch(session)
 
     async def _handle_document_tool(self, func_name: str, args: dict) -> str:
         if not self.user_id:
@@ -605,10 +886,7 @@ class Assistant:
         if not job_id:
             return json.dumps({"error": "ID de l'offre manquant."})
 
-        from leRH.db.repository import JobRepository
-
-        repo = JobRepository(self._db_session)
-        job = await repo.get_by_id(job_id)
+        job = await self._get_job(job_id)
 
         if not job:
             # Fallback : tenter de trouver par titre si l'ID ressemble a un titre
@@ -640,39 +918,95 @@ class Assistant:
 
         confirmed = args.get("confirmed", False)
         doc_type = "CV" if func_name == "generate_cv" else "lettre de motivation"
+        beneficiary_type = args.get("beneficiary_type") or "user"
+        target_profile = self._normalize_target_profile(args.get("target_profile"))
+        if beneficiary_type == "other":
+            missing = self._missing_target_profile_fields(target_profile)
+            if missing:
+                return json.dumps(
+                    {
+                        "error": (
+                            "Je ne peux pas générer ce document avec ton profil si c'est pour "
+                            "quelqu'un d'autre. Il me manque : " + ", ".join(missing) + "."
+                        ),
+                        "needs_target_profile": True,
+                        "required_fields": ["name", "activity", "skills", "experience"],
+                        "message": (
+                            "Donne-moi le mini-profil du bénéficiaire : nom, métier visé, "
+                            "expérience, compétences principales et formation si disponible."
+                        ),
+                    },
+                    ensure_ascii=False,
+                )
+        else:
+            target_profile = {}
+
+        target_key = target_profile.get("name") if beneficiary_type == "other" else self.user_id
+        task_key = (str(target_key), job.id, func_name)
 
         if not confirmed:
             # On demande confirmation en montrant les données actuelles
-            profile_summary = {
-                "Nom": self.name,
-                "Pays": self.country,
-                "Activité": self.activity or "Non renseignée",
-                "Compétences": self.skills or [],
-                "Diplôme": self.diploma or "Non renseigné",
-            }
+            if beneficiary_type == "other":
+                profile_summary = {
+                    "Nom": target_profile.get("name"),
+                    "Pays": self.country,
+                    "Activité": target_profile.get("activity"),
+                    "Compétences": target_profile.get("skills") or [],
+                    "Diplôme": target_profile.get("diploma") or "Non renseigné",
+                    "Expérience": target_profile.get("experience"),
+                }
+                owner = "du bénéficiaire"
+            else:
+                profile_summary = {
+                    "Nom": self.name,
+                    "Pays": self.country,
+                    "Activité": self.activity or "Non renseignée",
+                    "Compétences": self.skills or [],
+                    "Diplôme": self.diploma or "Non renseigné",
+                    "Expérience": self.experience or "Non renseignée",
+                }
+                owner = "ton profil"
             return json.dumps(
                 {
                     "confirmation_required": True,
                     "message": (
-                        f"Avant de générer votre {doc_type} (coût: {cost} crédits), "
-                        "veuillez confirmer que ces informations de votre profil sont correctes :\n"
-                        f"- Nom : {profile_summary['Nom']}\n"
-                        f"- Pays : {profile_summary['Pays']}\n"
-                        f"- Métier/Activité : {profile_summary['Activité']}\n"
-                        f"- Compétences : {', '.join(profile_summary['Compétences']) if profile_summary['Compétences'] else '—'}\n"
-                        f"- Diplôme : {profile_summary['Diplôme']}\n\n"
-                        "Est-ce correct ? (Vous pouvez aussi me demander de modifier une information)"
+                        f"Avant de générer le {doc_type}, confirme {owner}.\n\n"
+                        f"Nom : {profile_summary['Nom']}\n"
+                        f"Pays : {profile_summary['Pays']}\n"
+                        f"Métier : {profile_summary['Activité']}\n"
+                        f"Compétences : {', '.join(profile_summary['Compétences']) if profile_summary['Compétences'] else '—'}\n"
+                        f"Diplôme : {profile_summary['Diplôme']}\n\n"
+                        f"Coût : {cost} crédits.\n"
+                        "Note : ce document sera une proposition générée automatiquement. "
+                        "Il faudra le relire, car il peut contenir des erreurs.\n"
+                        "Réponds Oui si c'est correct, ou indique la correction."
                     ),
                     "profile_data": profile_summary,
                 },
                 ensure_ascii=False,
             )
 
+        if task_key in _ACTIVE_DOCUMENT_TASKS:
+            return json.dumps(
+                {
+                    "success": True,
+                    "message": (
+                        f"Ton {doc_type} est déjà en préparation.\n\n"
+                        f"Poste : {job.title}\n"
+                        f"Entreprise : {job.company or 'Non renseignée'}\n"
+                        "Je te l'envoie ici dès qu'il est prêt."
+                    ),
+                },
+                ensure_ascii=False,
+            )
+        _ACTIVE_DOCUMENT_TASKS.add(task_key)
+
         logger.info(
             "Background task launched: %s for user=%s job=%s", doc_type, self.user_id, job.title
         )
 
-        def _log_task_exception(t: asyncio.Task) -> None:
+        def _finish_document_task(t: asyncio.Task) -> None:
+            _ACTIVE_DOCUMENT_TASKS.discard(task_key)
             if not t.cancelled() and t.done():
                 exc = t.exception()
                 if exc:
@@ -686,18 +1020,22 @@ class Assistant:
 
         # Déduire immédiatement dans une transaction indépendante, avant de lancer la tâche.
         # On ne veut pas que cette déduction soit annulée si le handler principal rollback.
-        async with async_session_factory() as deduct_session:
-            deduct_result = await credit_mgr.deduct(
-                self.user_id, cost, reason=f"pre_{func_name}_{job.id}", session=deduct_session
-            )
-            if deduct_result.success:
-                await deduct_session.commit()
-            else:
-                return json.dumps({"error": deduct_result.message})
+        try:
+            async with async_session_factory() as deduct_session:
+                deduct_result = await credit_mgr.deduct(
+                    self.user_id, cost, reason=f"pre_{func_name}_{job.id}", session=deduct_session
+                )
+                if deduct_result.success:
+                    await deduct_session.commit()
+                else:
+                    _ACTIVE_DOCUMENT_TASKS.discard(task_key)
+                    return json.dumps({"error": deduct_result.message})
+        except Exception:
+            _ACTIVE_DOCUMENT_TASKS.discard(task_key)
+            raise
 
-        # Seulement maintenant lancer la tâche (sans déduction dedans)
-        task = asyncio.create_task(
-            generate_document_background(
+        async def _run_document_task() -> None:
+            await generate_document_background(
                 user_id=self.user_id,
                 job=job,
                 func_name=func_name,
@@ -705,16 +1043,22 @@ class Assistant:
                 platform=self.platform or "telegram",
                 chat_id=self.chat_id or self.user_id,
                 skip_deduction=True,
+                target_profile=target_profile if beneficiary_type == "other" else None,
             )
-        )
-        task.add_done_callback(_log_task_exception)
+
+        # Seulement maintenant lancer la tâche (sans déduction dedans)
+        task = asyncio.create_task(_run_document_task())
+        task.add_done_callback(_finish_document_task)
 
         return json.dumps(
             {
                 "success": True,
                 "message": (
-                    f"Je prépare votre {doc_type} en arrière-plan… "
-                    "Vous recevrez une notification dès qu'il sera prêt !"
+                    f"Je prépare ton {doc_type}.\n\n"
+                    f"Poste : {job.title}\n"
+                    f"Entreprise : {job.company or 'Non renseignée'}\n"
+                    "Note : ce sera une proposition à relire avant envoi.\n"
+                    "Tu le recevras ici dès qu'il sera prêt."
                 ),
             }
         )
@@ -729,6 +1073,7 @@ class Assistant:
 
         min_score = args.get("min_score", 60)
         credit_mgr = CreditManager()
+        created = False
 
         if self._db_session is not None:
             user_repo = UserRepository(self._db_session)
@@ -748,13 +1093,15 @@ class Assistant:
                     notify_telegram=True,
                     notify_whatsapp=True,
                 )
+                created = True
 
-            await credit_mgr.add(
-                self.user_id,
-                SUBSCRIPTION_BONUS,
-                reason="subscription_bonus",
-                session=self._db_session,
-            )
+            if created:
+                await credit_mgr.add(
+                    self.user_id,
+                    SUBSCRIPTION_BONUS,
+                    reason="subscription_bonus",
+                    session=self._db_session,
+                )
         else:
             async with async_session_factory() as session:
                 user_repo = UserRepository(session)
@@ -774,21 +1121,31 @@ class Assistant:
                         notify_telegram=True,
                         notify_whatsapp=True,
                     )
+                    created = True
 
-                await credit_mgr.add(
-                    self.user_id, SUBSCRIPTION_BONUS, reason="subscription_bonus", session=session
-                )
+                if created:
+                    await credit_mgr.add(
+                        self.user_id,
+                        SUBSCRIPTION_BONUS,
+                        reason="subscription_bonus",
+                        session=session,
+                    )
                 await session.commit()
 
+        bonus_message = (
+            f"Vous avez reçu {SUBSCRIPTION_BONUS} crédits bonus !"
+            if created
+            else "Votre abonnement était déjà actif, le score a été mis à jour."
+        )
         return json.dumps(
             {
                 "success": True,
                 "message": (
                     f"Vous êtes abonné aux alertes emploi (score minimum: {min_score}/100) ! "
                     f"Vous recevrez les offres chaque jour. "
-                    f"Vous avez reçu {SUBSCRIPTION_BONUS} crédits bonus !"
+                    f"{bonus_message}"
                 ),
-                "credits_awarded": SUBSCRIPTION_BONUS,
+                "credits_awarded": SUBSCRIPTION_BONUS if created else 0,
             }
         )
 
@@ -842,7 +1199,7 @@ class Assistant:
                 kwargs = {
                     "model": settings.llm_model_id,
                     "messages": messages,
-                    "temperature": 0.5,
+                    "temperature": 0.5,  # Plus élevée pour variété naturelle dans les réponses conversationnelles
                     "max_tokens": 1024,
                 }
                 if tools:
@@ -852,14 +1209,16 @@ class Assistant:
                 logger.error("LLM API timeout after %ds", settings.openai_timeout)
                 return "Désolé, le service IA met trop de temps à répondre. Veuillez réessayer dans quelques instants."
             except APIError as exc:
-                logger.error("LLM API error (code=%s): %s", exc.status_code, exc.message)
+                status_code = getattr(exc, "status_code", None)
+                message = getattr(exc, "message", str(exc))
+                logger.error("LLM API error (code=%s): %s", status_code or "-", message)
                 return "Désolé, le service IA est temporairement indisponible. Veuillez réessayer."
             except Exception:
                 logger.exception("LLM call failed")
                 return "Désolé, une erreur est survenue. Veuillez réessayer."
 
             if not tools:
-                return response.choices[0].message.content or ""
+                return self._format_response_for_platform(response.choices[0].message.content or "")
 
             finish_reason = response.choices[0].finish_reason
             assistant_msg = response.choices[0].message
@@ -888,7 +1247,7 @@ class Assistant:
                         _turn,
                     )
                     msg_content = "Désolé, je n'ai pas pu formuler une réponse. Veuillez réessayer."
-                return msg_content
+                return self._format_response_for_platform(msg_content)
             # Serialisation explicite en dict pour eviter tout artefact
             # de conversion qui pourrait reinjecter un system message
             # en milieu de conversation sur certains LLM.
@@ -927,4 +1286,4 @@ class Assistant:
                 "_call_with_tools: LLM returned empty content after %d turns", MAX_TOOL_TURNS
             )
             final_content = "Désolé, je n'ai pas pu générer une réponse. Veuillez réessayer."
-        return final_content
+        return self._format_response_for_platform(final_content)

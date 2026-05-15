@@ -21,3 +21,4 @@ env/
 *.log
 node_modules/
 adapters/whatsapp/session/
+*.db

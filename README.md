@@ -42,12 +42,27 @@ python -m leRH.adapters.telegram.bot
 cd adapters/whatsapp && npm install && npm run dev
 ```
 
-### ⚠️ Note sur SQLite et Multi-processus
+### ⚠️ Note sur MySQL et Multi-processus
 
-Bien que le README mentionne PostgreSQL pour la production, la configuration actuelle utilise **SQLite**. Pour éviter les erreurs `database is locked`, vous **devez** lancer l'API avec un seul worker :
+Pour le déploiement k3s actuel, l'API fonctionne avec **MySQL** via `DATABASE_URL=mysql+aiomysql://...`. En local, gardez un seul worker :
 
 ```bash
 uvicorn leRH.api.app:app --host 0.0.0.0 --port 8000 --workers 1
+```
+
+### Build Docker ARM64
+
+```bash
+docker buildx build \
+  --platform linux/arm64 \
+  -t abiyo27/lerh-api:latest \
+  --push .
+```
+
+### Déploiement k3s
+
+```bash
+kubectl apply -f deployment.yml
 ```
 
 ## Développement

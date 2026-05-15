@@ -43,7 +43,7 @@ async def analyze_cv(
     await cv_repo.create(
         user_id=user.id,
         original_name=payload.original_name,
-        extracted_text=payload.cv_text[:5000],
+        extracted_text=payload.cv_text,
         analysis=result,
     )
 

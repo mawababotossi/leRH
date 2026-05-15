@@ -15,7 +15,9 @@ from leRH.adapters.telegram.handlers.conversation import (
     cancel,
     country,
     diploma,
+    manage_notifications,
     show_profile,
+    show_status,
     skills,
     skip_activity,
     skip_diploma,
@@ -71,6 +73,8 @@ def build_application():
     )
     app.add_handler(conv)
     app.add_handler(CommandHandler("profil", show_profile))
+    app.add_handler(CommandHandler("statut", show_status))
+    app.add_handler(CommandHandler("notifications", manage_notifications))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.add_handler(MessageHandler(filters.VOICE, handle_voice))
     app.add_handler(MessageHandler(filters.AUDIO, handle_audio))

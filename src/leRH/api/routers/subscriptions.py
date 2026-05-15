@@ -70,13 +70,14 @@ async def update_subscription(
     return SubscriptionResponse.model_validate(sub)
 
 
-@router.delete("/{user_id}", status_code=204)
+@router.delete("/{user_id}", status_code=200)
 async def delete_subscription(
     user_id: str,
     db: AsyncSession = Depends(get_db),
-) -> None:
+) -> dict:
     sub_repo = SubscriptionRepository(db)
     sub = await sub_repo.get_by_user(user_id)
     if not sub:
         raise HTTPException(status_code=404, detail="Abonnement non trouvé")
     await sub_repo.delete(sub)
+    return {"message": "Abonnement supprimé"}

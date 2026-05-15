@@ -11,7 +11,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from leRH.core.assistants.manager import Assistant
 from leRH.core.conversation import ConversationMemory
+from leRH.core.credits import WELCOME_CREDITS
+from leRH.core.user_commands import (
+    build_notifications_text,
+    build_status_text,
+    maybe_subscription_prompt,
+    onboarding_capabilities_text,
+)
 from leRH.db.base import get_db
+from leRH.db.models import User
 from leRH.db.repository import CVRepository, JobRepository, UserRepository
 
 logger = logging.getLogger(__name__)
@@ -25,10 +33,10 @@ def _clean_jid(raw: str) -> str:
 
 
 WELCOME_INTRO = (
-    "Bienvenue sur leRH ! 🎯 Je suis Koffi, votre assistant emploi personnalisé.\n\n"
-    "Je vais vous aider à trouver des offres d'emploi et à générer des CV et lettres "
-    "de motivation adaptés à votre profil.\n\n"
-    "Pour commencer, quel est votre *prénom* ?"
+    "Bienvenue sur leRH.\n\n"
+    "Je suis Koffi, ton assistant emploi.\n"
+    "Je peux t'aider à trouver des offres et préparer tes documents.\n\n"
+    "Quel est ton prénom ?"
 )
 
 # Salutations courantes à ne pas interpréter comme un prénom
@@ -66,22 +74,15 @@ def _looks_like_greeting(text: str) -> bool:
 
 
 COUNTRY_QUESTION = (
-    "Merci *{name}* ! Dans quel pays habitez-vous ?\n(ex: Togo, Bénin, Côte d'Ivoire)"
+    "Merci {name}.\n\nDans quel pays habites-tu ?\nExemples : Togo, Bénin, Côte d'Ivoire"
 )
-ACTIVITY_QUESTION = "Parfait ! Quelle est votre profession ou domaine d'activité ?"
+ACTIVITY_QUESTION = "Quelle est ta profession ou ton domaine d'activité ?"
 SKILLS_QUESTION = (
-    "Très bien. Quelles sont vos 3 compétences principales ?\n"
-    "(ex: Python, Vente, Comptabilité, Gestion d'équipe)"
+    "Quelles sont tes 3 compétences principales ?\n\n"
+    "Exemples : Python, Vente, Comptabilité, Gestion d'équipe"
 )
-DIPLOMA_QUESTION = "D'accord. Quel est votre dernier diplôme ou niveau d'études ?"
-READY_MESSAGE = (
-    "Super *{name}*, votre profil de base est prêt ! 🎉\n\n"
-    "Vous pouvez maintenant :\n"
-    "• Envoyer votre *CV en PDF* pour que je l'analyse et personnalise vos documents\n"
-    "• Me poser des questions sur les offres d'emploi\n"
-    "• Demander la génération d'un CV ou d'une lettre de motivation\n\n"
-    "Comment puis-je vous aider ?"
-)
+DIPLOMA_QUESTION = "Quel est ton dernier diplôme ou niveau d'études ?"
+READY_MESSAGE = "{name}, ton profil de base est prêt.\n\n" + onboarding_capabilities_text()
 
 
 class StartRequest(BaseModel):
@@ -126,6 +127,24 @@ async def _get_local_jobs(db: AsyncSession) -> list:
     return await repo.get_active()
 
 
+async def _handle_slash_command(db: AsyncSession, user: User | None, text: str) -> str | None:
+    command = text.strip().split()[0].lower() if text.strip().startswith("/") else ""
+    if not command:
+        return None
+
+    if command in {"/statut", "/status", "/profil"}:
+        if not user:
+            return "Tu n'as pas encore de profil. Envoie /start pour commencer."
+        return await build_status_text(db, user)
+
+    if command in {"/notifications", "/notification"}:
+        if not user:
+            return "Tu n'as pas encore de profil. Envoie /start pour commencer."
+        return await build_notifications_text(db, user, platform="whatsapp", activate=True)
+
+    return None
+
+
 async def process_conversation(
     db: AsyncSession,
     whatsapp_id: str,
@@ -142,6 +161,10 @@ async def process_conversation(
 
     # 1. Vérifier si l'utilisateur existe déjà
     user = await get_user(db, whatsapp_id)
+    command_reply = await _handle_slash_command(db, user, text)
+    if command_reply is not None:
+        return command_reply
+
     if user:
         memory = ConversationMemory(db, user.id)
         # Si l'utilisateur est déjà prêt, on utilise l'assistant
@@ -159,23 +182,24 @@ async def process_conversation(
                 languages=user.languages,
                 local_jobs=local_jobs,
                 user_id=user.id,
+                credits=user.credits or 0,
                 platform="whatsapp",
                 chat_id=clean_id,
                 db_session=db,
             )
-            # Commit avant l'appel LLM pour libérer le verrou SQLite
             await db.commit()
             reply = await assistant.interact_with_history(text, history)
+            reply += await maybe_subscription_prompt(db, user)
             await memory.add_message("assistant", reply)
             return reply
-        
+
         # Sinon, on continue l'onboarding (cas rare où un User existe mais n'est pas ready)
         state = user.conversation_state
     else:
         # 2. Gestion de l'onboarding via session temporaire
         onboarding_repo = OnboardingRepository(db)
         session = await onboarding_repo.get(clean_id, "whatsapp")
-        
+
         if not session:
             # Premier contact : créer la session et envoyer Bienvenue
             await onboarding_repo.create(clean_id, "whatsapp")
@@ -191,17 +215,15 @@ async def process_conversation(
                 # On traite ce message comme le prénom (sauf si c'est une salutation)
                 name_candidate = text.strip()
                 if _looks_like_greeting(name_candidate):
-                    return (
-                        "Enchanté ! 😊 Pour commencer, pouvez-vous me donner votre *prénom* ?"
-                    )
-                
+                    return "Enchanté ! 😊 Pour commencer, pouvez-vous me donner votre prénom ?"
+
                 if user:
                     user.name = name_candidate[:255]
                     user.conversation_state = "awaiting_country"
                 else:
                     session.data = {**data, "name": name_candidate[:255]}
                     session.state = "awaiting_country"
-                
+
                 await db.flush()
                 return COUNTRY_QUESTION.format(name=name_candidate)
 
@@ -213,7 +235,7 @@ async def process_conversation(
                 else:
                     session.data = {**data, "country": country}
                     session.state = "awaiting_activity"
-                
+
                 await db.flush()
                 return ACTIVITY_QUESTION
 
@@ -225,7 +247,7 @@ async def process_conversation(
                 else:
                     session.data = {**data, "activity": activity}
                     session.state = "awaiting_skills"
-                
+
                 await db.flush()
                 return SKILLS_QUESTION
 
@@ -238,13 +260,13 @@ async def process_conversation(
                 else:
                     session.data = {**data, "skills": skills_list}
                     session.state = "awaiting_diploma"
-                
+
                 await db.flush()
                 return DIPLOMA_QUESTION
 
             case "awaiting_diploma":
                 diploma = text.strip()[:255]
-                
+
                 if user:
                     user.diploma = diploma
                     user.conversation_state = "ready"
@@ -260,19 +282,19 @@ async def process_conversation(
                         skills=data.get("skills"),
                         diploma=diploma,
                         conversation_state="ready",
-                        credits=10
+                        credits=WELCOME_CREDITS,
                     )
                     user_name = user.name
                     # Supprimer la session temporaire
                     await onboarding_repo.delete(clean_id, "whatsapp")
-                
+
                 await db.flush()
                 ready_msg = READY_MESSAGE.format(name=user_name or "")
-                
+
                 # Initialiser la mémoire avec le message de bienvenue prêt
                 memory = ConversationMemory(db, user.id)
                 await memory.add_message("assistant", ready_msg)
-                
+
                 return ready_msg
 
             case _:
@@ -338,7 +360,7 @@ async def whatsapp_document(
         await cv_repo.create(
             user_id=user.id,
             original_name=payload.filename,
-            extracted_text=cv_text[:5000],
+            extracted_text=cv_text,
             analysis=cv_analysis,
         )
 
@@ -373,7 +395,7 @@ async def whatsapp_voice(
 
     clean_id = _clean_jid(payload.from_)
     user = await get_user(db, payload.from_)
-    
+
     ap = AudioProcessor()
     transcription = ap.transcribe_base64(payload.audio_base64, payload.mimetype)
     if not transcription:
@@ -414,7 +436,6 @@ async def whatsapp_voice(
             chat_id=clean_id,
             db_session=db,
         )
-        # Commit avant l'appel LLM pour libérer le verrou SQLite
         await db.commit()
         reply_en = await assistant.interact_with_history(en_text, history)
         try:
@@ -423,6 +444,7 @@ async def whatsapp_voice(
         except Exception:
             reply = reply_en
 
+        reply += await maybe_subscription_prompt(db, user)
         await memory.add_message("assistant", reply)
 
     return ReplyResponse(reply=reply)

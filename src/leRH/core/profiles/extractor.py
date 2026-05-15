@@ -12,36 +12,38 @@ from leRH.db.models import User
 logger = logging.getLogger(__name__)
 
 
-UNIFIED_PROMPT = """Analyze this CV and return BOTH a human-readable analysis AND structured profile data.
+UNIFIED_PROMPT = """Analyse ce CV et retourne à la fois une analyse lisible ET des données de profil structurées.
+N'invente JAMAIS des informations qui ne sont pas dans le texte du CV.
 
-CV TEXT:
+TEXTE DU CV :
 {cv_text}
 
-Respond with a VALID JSON object containing:
-1. "full_name": candidate's full name (string)
-2. "email": candidate's email address (string or null)
-3. "phone": candidate's phone number (string or null)
-4. "address": candidate's physical address (string or null)
-5. "analysis": brief analysis in French (max 150 words) covering: main skills, experience level, expertise areas, strengths
-6. "profile": object with:
-   - skills: list of skill strings
-   - diploma: highest degree (string or null)
-   - experience_summary: brief professional experience summary (string)
-   - experiences: list of objects: {{"company": "...", "location": "...", "title": "...", "start_date": "...", "end_date": "...", "description": "..."}}
-   - education: list of objects: {{"institution": "...", "degree": "...", "field": "...", "year": "..."}}
-   - languages: list of {{"language": "...", "level": "..."}}
+Réponds avec un objet JSON VALIDE contenant :
+1. "full_name": nom complet du candidat (string ou null si introuvable)
+2. "email": adresse email (string ou null)
+3. "phone": numéro de téléphone (string ou null)
+4. "address": adresse physique (string ou null)
+5. "analysis": analyse en français (max 150 mots) couvrant : compétences principales, niveau d'expérience, domaines d'expertise, points forts
+6. "profile": objet avec :
+   - skills: liste des compétences (strings)
+   - diploma: diplôme le plus élevé (string ou null)
+   - experience_summary: résumé de l'expérience professionnelle (string)
+   - experiences: liste d'objets : {{"company": "...", "location": "...", "title": "...", "start_date": "...", "end_date": "...", "description": "..."}}
+   - education: liste d'objets : {{"institution": "...", "degree": "...", "field": "...", "year": "..."}}
+   - certifications: liste des certifications/formations certifiantes explicitement présentes dans le CV
+   - languages: liste de {{"language": "...", "level": "..."}}
    - social: {{"linkedin": "...", "github": "...", "website": "..."}}
 
-Example:
-{{"full_name": "Jean Dupont", "email": "jean@dupont.com", "analysis": "...", "profile": {{"skills": ["Python"]}}}}
+Exemple :
+{{"full_name": "Jean Dupont", "email": "jean.dupont@email.com", "phone": "+22890000000", "analysis": "Développeur Python avec 5 ans d'expérience...", "profile": {{"skills": ["Python", "Django", "PostgreSQL"], "diploma": "Master en Informatique", "experience_summary": "5 ans en développement web", "experiences": [{{"company": "Tech SARL", "location": "Lomé", "title": "Développeur", "start_date": "01/2020", "end_date": "Présent", "description": "Développement d'applications web"}}], "education": [{{"institution": "Université de Lomé", "degree": "Master", "field": "Informatique", "year": "2018"}}], "certifications": ["Formation Docker avancée — Organisme — 2020"], "languages": [{{"language": "Français", "level": "Natif"}}], "social": {{"linkedin": "linkedin.com/in/jeandupont", "github": "github.com/jeandupont", "website": null}}}}}}
 
-Return ONLY the JSON object, no other text."""
+Retourne UNIQUEMENT l'objet JSON, pas d'autre texte."""
 
 
 class ProfileExtractor:
     def __init__(self) -> None:
         self._client = OpenAI(
-            api_key=settings.openai_api_key,
+            api_key=settings.openai_api_key.get_secret_value(),
             base_url=settings.openai_base_url,
             timeout=settings.openai_timeout,
         )
@@ -53,14 +55,14 @@ class ProfileExtractor:
                 messages=[
                     {
                         "role": "system",
-                        "content": "You are a CV analysis AI. Extract structured data and write concise analysis.",
+                        "content": "Tu es un expert en analyse de CV. Extrais les données structurées et rédige une analyse concise en français. N'invente jamais d'informations.",
                     },
                     {
                         "role": "user",
                         "content": UNIFIED_PROMPT.format(cv_text=cv_text[:30000]),
                     },
                 ],
-                temperature=0.05,
+                temperature=0.05,  # Très basse : extraction déterministe, zéro créativité
                 max_tokens=4096,
             )
             content = response.choices[0].message.content or ""
@@ -84,14 +86,14 @@ class ProfileExtractor:
                 messages=[
                     {
                         "role": "system",
-                        "content": "You extract structured profile data from CVs. Return only valid JSON.",
+                        "content": "Tu extrais des données de profil structurées à partir de CVs. Ne retourne que du JSON valide. N'invente jamais d'informations absentes du texte.",
                     },
                     {
                         "role": "user",
                         "content": EXTRACTION_PROMPT.format(cv_text=cv_text[:30000]),
                     },
                 ],
-                temperature=0.05,
+                temperature=0.05,  # Très basse : extraction déterministe
                 max_tokens=4096,
             )
             content = response.choices[0].message.content or ""
@@ -121,11 +123,12 @@ class ProfileExtractor:
     def enrich_user(user: User, data: dict) -> User:
         from leRH.db.models import Education, Experience
 
-        if full_name := data.get("full_name"):
-            # Ne mettre à jour que si ce n'est pas un prénom court (onboarding)
-            # ou si le nom actuel est vide
-            if not user.name or len(full_name.split()) > len(user.name.split()):
-                user.name = full_name[:255]
+        # Ne mettre à jour que si ce n'est pas un prénom court (onboarding)
+        # ou si le nom actuel est vide.
+        if (full_name := data.get("full_name")) and (
+            not user.name or len(full_name.split()) > len(user.name.split())
+        ):
+            user.name = full_name[:255]
 
         if email := data.get("email"):
             user.email = email[:255]
@@ -194,16 +197,47 @@ class ProfileExtractor:
         return user
 
 
-EXTRACTION_PROMPT = """Analyze this CV text and extract structured profile information.
+EXTRACTION_PROMPT = """Analyse ce CV et extrais les informations de profil structurées.
+N'invente JAMAIS des informations absentes du texte. Si un champ est introuvable, utilise null pour les chaînes et [] pour les listes.
 
-CV TEXT:
+TEXTE DU CV :
 {cv_text}
 
-Return ONLY a valid JSON object with these exact fields:
+Exemple de réponse :
 {{
-  "skills": ["skill1", "skill2", ...],
-  "diploma": "highest degree obtained",
-  "experience_summary": "brief summary",
+  "skills": ["Python", "Django", "PostgreSQL", "Docker"],
+  "diploma": "Master en Informatique",
+  "experience_summary": "Développeur full-stack avec 5 ans d'expérience",
+  "experiences": [
+    {{
+      "company": "Tech SARL",
+      "location": "Lomé, Togo",
+      "title": "Développeur Full-Stack",
+      "start_date": "01/2020",
+      "end_date": "Présent",
+      "description": "Développement d'applications web avec Django et React"
+    }}
+  ],
+  "education": [
+    {{
+      "institution": "Université de Lomé",
+      "degree": "Master",
+      "field": "Informatique",
+      "year": "2018"
+    }}
+  ],
+  "certifications": ["Formation Docker avancée — Organisme — 2020"],
+  "languages": [{{"language": "Français", "level": "natif"}}, {{"language": "Anglais", "level": "courant"}}],
+  "social": {{"linkedin": "linkedin.com/in/jeandupont", "github": "github.com/jeandupont", "website": null}},
+  "domain": "Développement web",
+  "years_experience": 5
+}}
+
+Retourne UNIQUEMENT un objet JSON valide avec ces champs exacts :
+{{
+  "skills": ["compétence1", "compétence2", ...],
+  "diploma": "diplôme le plus élevé ou null",
+  "experience_summary": "résumé concis ou null",
   "experiences": [
     {{
       "company": "...",
@@ -222,10 +256,9 @@ Return ONLY a valid JSON object with these exact fields:
       "year": "..."
     }}
   ],
-  "languages": [{{"language": "French", "level": "native"}}, ...],
+  "certifications": ["certification ou formation certifiante explicitement présente dans le CV", ...],
+  "languages": [{{"language": "Français", "level": "natif"}}, ...],
   "social": {{"linkedin": "...", "github": "...", "website": "..."}},
-  "domain": "main professional domain",
+  "domain": "domaine professionnel principal ou null",
   "years_experience": 5
-}}
-
-If a field cannot be determined, use null for strings and [] for arrays."""
+}}"""

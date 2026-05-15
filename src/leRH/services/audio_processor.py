@@ -53,7 +53,7 @@ class AudioProcessor:
             with open(tmp_path, "rb") as f:
                 mime = "audio/ogg" if suffix == ".oga" else "audio/wav"
                 files = {"file": (f"audio{suffix}", f, mime)}
-                headers = {"Authorization": f"Bearer {settings.openai_api_key}"}
+                headers = {"Authorization": f"Bearer {settings.openai_api_key.get_secret_value()}"}
                 resp = httpx.post(
                     NVIDIA_AUDIO_URL,
                     headers=headers,

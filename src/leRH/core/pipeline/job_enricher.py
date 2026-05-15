@@ -13,6 +13,7 @@ from leRH.core.scraping.types import ScrapedJob
 logger = logging.getLogger(__name__)
 
 ENRICH_PROMPT = """Analyse cette offre d'emploi et retourne UNIQUEMENT un objet JSON.
+N'invente JAMAIS des informations. Si un champ est impossible à déterminer, utilise null.
 
 Titre: {title}
 Entreprise: {company}
@@ -20,11 +21,24 @@ Ville: {city}
 Description:
 {description}
 
-Réponds UNIQUEMENT avec ce JSON (pas d'autre texte):
+Exemple de réponse :
 {{
-  "title_clean": "titre nettoyé (corrige les espaces, majuscules, tirets)",
-  "company_clean": "nom entreprise extrait ou null",
-  "city_clean": "ville extraite ou null",
+  "title_clean": "Développeur Full-Stack Python/Django",
+  "company_clean": "Tech SARL",
+  "city_clean": "Lomé",
+  "skills": ["Python", "Django", "React", "PostgreSQL"],
+  "diploma_required": "BAC+5 en Informatique",
+  "experience_level": "confirme",
+  "sector": "Technologies de l'information",
+  "contract_type": "CDI",
+  "description_clean": "Développeur expérimenté pour concevoir et maintenir des applications web. Stack Python/Django en backend et React en frontend."
+}}
+
+Réponds UNIQUEMENT avec ce JSON (pas d'autre texte) :
+{{
+  "title_clean": "titre nettoyé ou null",
+  "company_clean": "nom entreprise ou null",
+  "city_clean": "ville ou null",
   "skills": ["compétence1", "compétence2"],
   "diploma_required": "diplôme requis ou null",
   "experience_level": "debutant|intermediaire|confirme|senior|non_specifie",
@@ -37,7 +51,7 @@ Réponds UNIQUEMENT avec ce JSON (pas d'autre texte):
 class JobEnricher:
     def __init__(self) -> None:
         self._client = OpenAI(
-            api_key=settings.openai_api_key,
+            api_key=settings.openai_api_key.get_secret_value(),
             base_url=settings.openai_base_url,
             timeout=settings.openai_timeout,
         )
@@ -64,7 +78,7 @@ class JobEnricher:
                         },
                         {"role": "user", "content": prompt},
                     ],
-                    temperature=0.05,
+                    temperature=0.05,  # Très basse : classification déterministe, pas de créativité
                     max_tokens=512,
                 )
                 content = response.choices[0].message.content or ""

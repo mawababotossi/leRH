@@ -20,31 +20,41 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/documents", tags=["documents"])
 
 
-async def _check_credits(user_id: str, cost: int, session: AsyncSession | None = None) -> None:
-    cm = CreditManager()
-    if not await cm.check_credits(user_id, cost, session=session):
-        current = await cm.get_credits(user_id, session=session)
-        raise HTTPException(
-            status_code=402,
-            detail=(
-                f"Crédits insuffisants. Vous avez {current} crédit(s), "
-                f"il en faut {cost}. Activez les alertes emploi pour recevoir 50 crédits bonus."
-            ),
-        )
-
-
-async def _deduct_credits(
+async def _reserve_credits(
     user_id: str, cost: int, reason: str, session: AsyncSession | None = None
 ) -> None:
     cm = CreditManager()
     result = await cm.deduct(user_id, cost, reason, session=session)
     if not result.success:
-        logger.warning("Credit deduction failed for user %s: %s", user_id, result.message)
+        raise HTTPException(
+            status_code=402,
+            detail=(
+                f"Crédits insuffisants. Vous avez {result.credits_remaining} crédit(s), "
+                f"il en faut {cost}. Activez les alertes emploi pour recevoir 7 crédits bonus."
+            ),
+        )
+
+
+async def _refund_credits(
+    user_id: str, cost: int, reason: str, session: AsyncSession | None = None
+) -> None:
+    cm = CreditManager()
+    result = await cm.add(user_id, cost, reason, session=session)
+    if not result.success:
+        logger.warning("Credit refund failed for user %s: %s", user_id, result.message)
 
 
 def _validate_format(fmt: str) -> None:
     if fmt not in ("docx", "pdf"):
         raise HTTPException(status_code=400, detail="Format must be 'docx' or 'pdf'")
+
+
+def _cv_analysis_with_source(cv_record) -> dict | None:
+    if not cv_record or not cv_record.analysis:
+        return None
+    analysis = dict(cv_record.analysis)
+    analysis["source_text"] = cv_record.extracted_text or ""
+    return analysis
 
 
 def _streaming_response(buf: BytesIO, filename: str, content_type: str) -> StreamingResponse:
@@ -79,23 +89,20 @@ async def generate_cv(
     # Charger le dernier CV analysé pour enrichir la génération
     cv_repo = CVRepository(db)
     cv_record = await cv_repo.get_latest_for_user(payload.user_id)
-    cv_analysis = cv_record.analysis if cv_record else None
+    cv_analysis = _cv_analysis_with_source(cv_record)
     if not cv_analysis:
         logger.info(
             "User %s has no uploaded CV — document will be generated from profile fields only",
             payload.user_id,
         )
 
-    await _check_credits(payload.user_id, CV_COST, session=db)
-    # Commit avant l'appel LLM pour libérer le verrou SQLite
-    await db.commit()
+    await _reserve_credits(payload.user_id, CV_COST, f"reserve_generate_cv_{job.id}")
 
     try:
         gen = DocumentGenerator()
         buf, filename = await asyncio.to_thread(
             gen.generate_cv, user, job, fmt=payload.format, cv_analysis=cv_analysis
         )
-        await _deduct_credits(payload.user_id, CV_COST, f"generate_cv_{job.id}", session=db)
 
         content_type = (
             "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
@@ -104,9 +111,11 @@ async def generate_cv(
         )
         return _streaming_response(buf, filename, content_type)
     except HTTPException:
+        await _refund_credits(payload.user_id, CV_COST, f"refund_generate_cv_{job.id}")
         raise
     except Exception as exc:
         logger.exception("CV generation failed")
+        await _refund_credits(payload.user_id, CV_COST, f"refund_generate_cv_{job.id}")
         raise HTTPException(
             status_code=500,
             detail=str(exc) or "Erreur lors de la génération du CV",
@@ -133,19 +142,18 @@ async def generate_cover_letter(
     # Charger le dernier CV analysé pour enrichir la génération
     cv_repo = CVRepository(db)
     cv_record = await cv_repo.get_latest_for_user(payload.user_id)
-    cv_analysis = cv_record.analysis if cv_record else None
+    cv_analysis = _cv_analysis_with_source(cv_record)
 
-    await _check_credits(payload.user_id, COVER_LETTER_COST, session=db)
-    # Commit avant l'appel LLM pour libérer le verrou SQLite
-    await db.commit()
+    await _reserve_credits(
+        payload.user_id,
+        COVER_LETTER_COST,
+        f"reserve_generate_cover_letter_{job.id}",
+    )
 
     try:
         gen = DocumentGenerator()
         buf, filename = await asyncio.to_thread(
             gen.generate_cover_letter, user, job, fmt=payload.format, cv_analysis=cv_analysis
-        )
-        await _deduct_credits(
-            payload.user_id, COVER_LETTER_COST, f"generate_cover_letter_{job.id}", session=db
         )
 
         content_type = (
@@ -155,9 +163,19 @@ async def generate_cover_letter(
         )
         return _streaming_response(buf, filename, content_type)
     except HTTPException:
+        await _refund_credits(
+            payload.user_id,
+            COVER_LETTER_COST,
+            f"refund_generate_cover_letter_{job.id}",
+        )
         raise
     except Exception as exc:
         logger.exception("Cover letter generation failed")
+        await _refund_credits(
+            payload.user_id,
+            COVER_LETTER_COST,
+            f"refund_generate_cover_letter_{job.id}",
+        )
         raise HTTPException(
             status_code=500,
             detail=str(exc) or "Erreur lors de la génération de la lettre de motivation",
@@ -184,11 +202,10 @@ async def generate_all(
     # Charger le dernier CV analysé (une seule requête pour les deux documents)
     cv_repo = CVRepository(db)
     cv_record = await cv_repo.get_latest_for_user(payload.user_id)
-    cv_analysis = cv_record.analysis if cv_record else None
+    cv_analysis = _cv_analysis_with_source(cv_record)
 
-    await _check_credits(payload.user_id, CV_COST + COVER_LETTER_COST, session=db)
-    # Commit avant l'appel LLM pour libérer le verrou SQLite
-    await db.commit()
+    total_cost = CV_COST + COVER_LETTER_COST
+    await _reserve_credits(payload.user_id, total_cost, f"reserve_generate_all_{job.id}")
 
     try:
         gen = DocumentGenerator()
@@ -197,9 +214,6 @@ async def generate_all(
         )
         cl_buf, cl_filename = await asyncio.to_thread(
             gen.generate_cover_letter, user, job, fmt=payload.format, cv_analysis=cv_analysis
-        )
-        await _deduct_credits(
-            payload.user_id, CV_COST + COVER_LETTER_COST, f"generate_all_{job.id}", session=db
         )
 
         zip_buf = BytesIO()
@@ -211,9 +225,11 @@ async def generate_all(
         zip_name = f"Candidature_{user.name.replace(' ', '_')}.zip"
         return _streaming_response(zip_buf, zip_name, "application/zip")
     except HTTPException:
+        await _refund_credits(payload.user_id, total_cost, f"refund_generate_all_{job.id}")
         raise
     except Exception as exc:
         logger.exception("Document generation failed")
+        await _refund_credits(payload.user_id, total_cost, f"refund_generate_all_{job.id}")
         raise HTTPException(
             status_code=500,
             detail=str(exc) or "Erreur lors de la génération des documents",

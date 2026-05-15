@@ -18,7 +18,7 @@ depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
-    op.add_column("users", sa.Column("credits", sa.Integer(), nullable=False, server_default="10"))
+    op.add_column("users", sa.Column("credits", sa.Integer(), nullable=False, server_default="20"))
 
 
 def downgrade() -> None:

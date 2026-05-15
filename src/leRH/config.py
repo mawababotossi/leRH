@@ -26,8 +26,10 @@ class Settings(BaseSettings):
     country: str = "Togo"
     activity: str = "job seeker"
 
-    database_url: str = "sqlite+aiosqlite:///data/lerh.db"
+    database_url: str = "mysql+aiomysql://user:pass@localhost:3306/lerh"
     allowed_origins: list[str] = ["http://localhost:3000", "http://localhost:5173"]
+    auto_create_tables: bool = True
+    enable_scheduler: bool = True
 
     search_enabled: bool = True
     search_max_results: int = 5

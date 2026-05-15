@@ -5,14 +5,13 @@ WORKDIR /app
 RUN python -m venv /venv
 ENV PATH="/venv/bin:$PATH"
 
-COPY pyproject.toml .
-RUN apt-get update && apt-get install -y libpq-dev gcc && \
-    pip install --no-cache-dir -e ".[dev]" && \
-    rm -rf /var/lib/apt/lists/*
+COPY pyproject.toml README.md ./
+COPY src/ src/
+RUN pip install --no-cache-dir -e ".[dev]"
 
 FROM python:3.11-slim
 
-RUN apt-get update && apt-get install -y libpq-dev ffmpeg && \
+RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg && \
     rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

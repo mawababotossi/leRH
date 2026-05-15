@@ -1,0 +1,111 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: lerh-api
+  namespace: lerh
+  labels:
+    app: lerh-api
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: lerh-api
+  template:
+    metadata:
+      labels:
+        app: lerh-api
+    spec:
+      nodeSelector:
+        kubernetes.io/arch: arm64
+      containers:
+        - name: lerh-api
+          image: abiyo27/lerh-api:latest
+          imagePullPolicy: Always
+          ports:
+            - name: http
+              containerPort: 8000
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: lerh-secrets
+                  key: database_url
+            - name: OPENAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: lerh-secrets
+                  key: openai_api_key
+            - name: INTERNAL_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: lerh-secrets
+                  key: internal_api_key
+            - name: AUTO_CREATE_TABLES
+              value: "false"
+            - name: ENABLE_SCHEDULER
+              value: "true"
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 6
+          livenessProbe:
+            tcpSocket:
+              port: http
+            initialDelaySeconds: 20
+            periodSeconds: 20
+            timeoutSeconds: 3
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: lerh-api
+  namespace: lerh
+  labels:
+    app: lerh-api
+spec:
+  type: ClusterIP
+  selector:
+    app: lerh-api
+  ports:
+    - name: http
+      port: 80
+      protocol: TCP
+      targetPort: http
+  sessionAffinity: None
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: lerh-api
+  namespace: lerh
+  annotations:
+    kubernetes.io/ingress.class: traefik
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+spec:
+  tls:
+    - hosts:
+        - api.lerh.example.com
+      secretName: lerh-api-tls
+  rules:
+    - host: api.lerh.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: lerh-api
+                port:
+                  number: 80

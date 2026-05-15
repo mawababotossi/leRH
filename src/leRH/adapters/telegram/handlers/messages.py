@@ -6,6 +6,7 @@ from telegram import Update
 from telegram.ext import ContextTypes
 
 from leRH.core.assistants.manager import Assistant
+from leRH.core.user_commands import maybe_subscription_prompt
 from leRH.db.base import async_session_factory
 from leRH.db.repository import JobRepository, MessageRepository, UserRepository
 
@@ -83,8 +84,12 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     reply = await assistant.interact_with_history(text, history)
 
     async with async_session_factory() as session:
+        user_repo = UserRepository(session)
+        current_user = await user_repo.get_by_id(user.id)
         msg_repo = MessageRepository(session)
         await msg_repo.create(user_id=user.id, role="user", content=text, channel="telegram")
+        if current_user:
+            reply += await maybe_subscription_prompt(session, current_user)
         await msg_repo.create(user_id=user.id, role="assistant", content=reply, channel="telegram")
         await session.commit()
 

@@ -144,14 +144,14 @@ Endpoints :
 
 ### 9. Système de Crédits
 
-Chaque utilisateur reçoit **10 crédits** à l'inscription. Les actions suivantes consomment des crédits :
+Chaque utilisateur reçoit **20 crédits** à l'inscription. Les actions suivantes consomment des crédits :
 
 | Action | Coût |
 |---|---|
 | Génération de CV | 5 crédits |
 | Génération de lettre de motivation | 3 crédits |
 | Notification quotidienne envoyée | 1 crédit |
-| Abonnement aux alertes emploi | Gratuit (+50 crédits bonus) |
+| Abonnement aux alertes emploi | Gratuit (+7 crédits bonus) |
 
 Les crédits sont gérés par `CreditManager` (`core/credits.py`) avec une base SQLite synchrone pour compatibilité avec les appels d'outils de l'Assistant.
 
@@ -165,7 +165,7 @@ Koffi dispose de ces outils (function calling) :
 | `search_web_jobs` | Cherche sur le web (DuckDuckGo) | Toujours disponible |
 | `generate_cv` | Génère un CV ATS pour une offre | 5 crédits, nécessite `user_id` |
 | `generate_cover_letter` | Génère une lettre de motivation | 3 crédits, nécessite `user_id` |
-| `subscribe_job_alerts` | Active les alertes quotidiennes | Gratuit, donne 50 crédits bonus |
+| `subscribe_job_alerts` | Active les alertes quotidiennes | Gratuit, donne 7 crédits bonus |
 
 Le `user_id` et `credits` sont passés à l'Assistant depuis les handlers (Telegram/WhatsApp).
 

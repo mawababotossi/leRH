@@ -195,7 +195,7 @@ async def test_delete_job(client: AsyncClient, db_session) -> None:
     job_id = create.json()["id"]
 
     resp = await client.delete(f"/jobs/{job_id}")
-    assert resp.status_code == 204
+    assert resp.status_code == 200
 
     get_resp = await client.get(f"/jobs/{job_id}")
     assert get_resp.json()["status"] == "inactive"
